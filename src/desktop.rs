@@ -13,13 +13,29 @@ pub struct Entry {
     pub terminal: bool,
 }
 
-const TERMINAL_CANDIDATES: [&str; 7] = [
-    "foot", "alacritty", "kitty", "wezterm", "ghostty", "konsole", "xterm",
+/// A terminal emulator plus the arguments that make it run a program instead of
+/// an interactive shell. The forms differ, so this cannot be a fixed `-e`.
+struct Terminal {
+    program: PathBuf,
+    prefix: &'static [&'static str],
+}
+
+/// Each entry is the emulator's documented form: `foot` takes the command
+/// positionally (its `-e` is accepted but ignored), `kitty` uses `--`, and
+/// `wezterm` needs its `start` subcommand.
+const TERMINAL_CANDIDATES: [(&str, &[&str]); 7] = [
+    ("foot", &[]),
+    ("alacritty", &["-e"]),
+    ("kitty", &["--"]),
+    ("wezterm", &["start", "--"]),
+    ("ghostty", &["-e"]),
+    ("konsole", &["-e"]),
+    ("xterm", &["-e"]),
 ];
 
 /// `$TERMINAL` wins when it names an executable on `PATH`, then a short list of
-/// common emulators. Returns the program, never a shell string.
-fn pick_terminal(env_terminal: Option<&str>, path: &[PathBuf]) -> Option<PathBuf> {
+/// common emulators. Returns the program and its prefix, never a shell string.
+fn pick_terminal(env_terminal: Option<&str>, path: &[PathBuf]) -> Option<Terminal> {
     let find = |name: &str| {
         path.iter()
             .map(|dir| dir.join(name))
@@ -27,14 +43,21 @@ fn pick_terminal(env_terminal: Option<&str>, path: &[PathBuf]) -> Option<PathBuf
     };
     if let Some(value) = env_terminal
         && let Some(name) = value.split_whitespace().next()
-        && let Some(found) = find(name)
+        && let Some(program) = find(name)
     {
-        return Some(found);
+        // An unknown emulator gets the widest convention; the user can point
+        // $TERMINAL at one that accepts -e.
+        return Some(Terminal {
+            program,
+            prefix: &["-e"],
+        });
     }
-    TERMINAL_CANDIDATES.iter().find_map(|name| find(name))
+    TERMINAL_CANDIDATES
+        .iter()
+        .find_map(|(name, prefix)| find(name).map(|program| Terminal { program, prefix }))
 }
 
-fn terminal_program() -> Option<PathBuf> {
+fn terminal_program() -> Option<Terminal> {
     let path: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|value| std::env::split_paths(&value).collect())
         .unwrap_or_default();
@@ -42,7 +65,7 @@ fn terminal_program() -> Option<PathBuf> {
 }
 
 impl Entry {
-    fn command(&self, terminal: Option<PathBuf>) -> Result<Command, String> {
+    fn command(&self, terminal: Option<Terminal>) -> Result<Command, String> {
         let (program, args) = self
             .exec
             .split_first()
@@ -58,8 +81,8 @@ impl Entry {
                 self.name
             )
         })?;
-        let mut command = Command::new(terminal);
-        command.arg("-e");
+        let mut command = Command::new(&terminal.program);
+        command.args(terminal.prefix);
         command.args(&self.exec);
         Ok(command)
     }
@@ -782,23 +805,69 @@ mod tests {
         assert_eq!(results[1].name, "App 00");
     }
 
+    fn install(path: &Path) {
+        write(path, "#!/bin/sh\n");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[test]
     fn terminal_program_prefers_env_then_known_emulators() {
         let dir = temp_dir("term");
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let fake = bin.join("myterm");
-        write(&fake, "#!/bin/sh\n");
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        install(&fake);
         let path = vec![bin.clone()];
-        assert_eq!(pick_terminal(Some("myterm"), &path), Some(fake.clone()));
-        assert_eq!(pick_terminal(Some("missing --flag"), &path), None);
-        assert_eq!(pick_terminal(None, &path), None, "only listed names count");
-        let foot = bin.join("foot");
-        write(&foot, "#!/bin/sh\n");
-        std::fs::set_permissions(&foot, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(pick_terminal(None, &path), Some(foot));
+        let from_env = pick_terminal(Some("myterm"), &path).unwrap();
+        assert_eq!(from_env.program, fake);
+        assert_eq!(from_env.prefix, ["-e"]);
+        assert!(pick_terminal(Some("missing --flag"), &path).is_none());
+        assert!(pick_terminal(None, &path).is_none(), "only listed names count");
+        install(&bin.join("foot"));
+        let fallback = pick_terminal(None, &path).unwrap();
+        assert_eq!(fallback.program, bin.join("foot"));
+        assert!(fallback.prefix.is_empty(), "foot takes the command directly");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn each_fallback_uses_its_own_program_arguments() {
+        // Documented invocations: alacritty -e, kitty --, wezterm start --,
+        // ghostty/konsole/xterm -e, foot positionally.
+        let cases: [(&str, &[&str]); 7] = [
+            ("foot", &[]),
+            ("alacritty", &["-e"]),
+            ("kitty", &["--"]),
+            ("wezterm", &["start", "--"]),
+            ("ghostty", &["-e"]),
+            ("konsole", &["-e"]),
+            ("xterm", &["-e"]),
+        ];
+        for (name, prefix) in cases {
+            let dir = temp_dir(name);
+            let bin = dir.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let exe = bin.join(name);
+            install(&exe);
+            let found = pick_terminal(None, &[bin]).unwrap();
+            assert_eq!(found.program, exe, "{name}");
+            assert_eq!(found.prefix, prefix, "{name}");
+
+            let mut entry = entry("x.desktop", "X");
+            entry.exec = vec!["btop".into(), "--utf".into()];
+            entry.terminal = true;
+            let mut expected: Vec<&str> = prefix.to_vec();
+            expected.extend(["btop", "--utf"]);
+            let command = entry
+                .command(Some(Terminal {
+                    program: exe.clone(),
+                    prefix,
+                }))
+                .unwrap();
+            assert_eq!(command.get_program(), exe, "{name}");
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{name}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
@@ -809,12 +878,14 @@ mod tests {
         assert_eq!(plain.get_program(), "btop");
         assert_eq!(plain.get_args().collect::<Vec<_>>(), ["--utf"]);
         entry.terminal = true;
-        let wrapped = entry.command(Some(PathBuf::from("/usr/bin/foot"))).unwrap();
+        let wrapped = entry
+            .command(Some(Terminal {
+                program: PathBuf::from("/usr/bin/foot"),
+                prefix: &[],
+            }))
+            .unwrap();
         assert_eq!(wrapped.get_program(), "/usr/bin/foot");
-        assert_eq!(
-            wrapped.get_args().collect::<Vec<_>>(),
-            ["-e", "btop", "--utf"]
-        );
+        assert_eq!(wrapped.get_args().collect::<Vec<_>>(), ["btop", "--utf"]);
         let error = entry.command(None).unwrap_err();
         assert!(error.contains("no terminal emulator"), "{error}");
     }
