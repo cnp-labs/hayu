@@ -93,6 +93,11 @@ support in V1.
 - `HAYU_DEBUG_KEYS=1` traces keysyms, query, selection and per-frame draw time;
   `HAYU_DEBUG_SCAN=1` traces the scan duration. Both are off by default and are
   what the live input check asserts on. Do not log query text without them.
+- Keysyms come from the seat's current xkb keymap, which the keyboard handler
+  rebuilds on `wl_keyboard.keymap`; never cache key-to-character mappings. A
+  runtime layout switch must keep working without a restart.
+- The launcher opens on the focused monitor and falls back to the first bar; a
+  removed output drops its surface without ending the process.
 - The launcher surface is reused across opens: closing detaches the buffer and
   clears `configured`, opening re-requests a configure and paints only from
   that event. Attaching a buffer before a fresh configure makes the compositor

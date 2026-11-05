@@ -1,6 +1,6 @@
 # Testing strategy and release gate
 
-Status: plan with a partial M0 suite. `cargo test` runs 38 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists, and IME, screen-reader, soak, and multi-monitor tests have not been run.
+Status: plan with a partial M0 suite. `cargo test` runs 38 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, scale 2 and two outputs were exercised live (see below); IME, screen-reader, soak, fractional scale and mixed per-output scales have not been run.
 
 ## Testing layers
 
@@ -27,7 +27,7 @@ Run at commit `10fbb4c` on the target machine (Hyprland 0.57.0, one output, scal
 | `Terminal=true` entry runs inside foot and closes the overlay | Live pass |
 | Failing `Exec` keeps the overlay open and reports the error | Live pass |
 | `hayu quit` exits 0 and the socket is removed | Live pass |
-| IME, key repeat after a real compositor keymap change, multi-monitor, scale 2 | Not tested |
+| IME | Not tested |
 
 Unit tests still own the parts the live run cannot isolate: Exec tokenization and field-code rejection, desktop-ID deduplication, filter ordering, terminal resolution, socket framing and permissions, and key mapping.
 
@@ -50,9 +50,44 @@ Unit tests still own the parts the live run cannot isolate: Exec tokenization an
   frames including the cold first frame, and the CLI round trip measured around
   `hayu launcher toggle`.
 - Limits: one 1366×768 output at scale 1, 46 desktop entries, one session, one
-  idle sample; no multi-monitor, fractional scale or IME. The CLI round trip
-  ends when the control socket answers, so surface-map latency is not isolated,
-  and no GPU metric was collected for the launcher.
+  idle sample; no fractional scale or IME. The CLI round trip ends when the
+  control socket answers, so surface-map latency is not isolated, and no GPU
+  metric was collected for the launcher.
+
+### Scale 2, two outputs and a runtime keymap switch (November 5, 2026)
+
+Run at commit `9e0a4d3` with the same harness and observation setup. This
+Hyprland uses the Lua config provider, where `hyprctl keyword` answers
+`unknown request`, so both outputs were configured with
+`hyprctl eval 'hl.monitor({ ... })'`; `HEADLESS-1` (1920×1080) was created with
+`hyprctl output create headless` and focused with
+`hl.dispatch(hl.dsp.focus({monitor = "HEADLESS-1"}))`.
+
+| Check | Result |
+| --- | --- |
+| Full 20-check launcher suite on one output at scale 2 | Live pass |
+| One bar per output at its own logical size (683×32 and 960×32) | Live pass |
+| Launcher opens on the focused output (`HEADLESS-1`) at 560×420 logical | Live pass |
+| Typing, selection and launch on that output | Live pass |
+| Removing `HEADLESS-1` while the launcher is open: shell survives, layer disappears | Live pass |
+| Next open lands on the remaining output and accepts keys | Live pass |
+| Keymap `us`→`de`: evdev keycode 44 yields `z` before and `y` after, no restart | Live pass |
+| Mixed per-output scales, fractional scale, IME | Not tested |
+
+- Scale: the launcher read the new scale from the output info and drew a
+  1120×840 buffer for its 560×420 logical surface; the exact pixels are covered
+  by the offscreen scale-2 render test, because no screenshot tool is installed
+  for a live diff.
+- Unplug: a headless output was removed rather than a physical cable, so the
+  `wl_output` removal path was exercised but a real hotplug was not.
+- Keymap: the change came from a second `zwp_virtual_keyboard_v1` client
+  uploading a `de` keymap, which makes the compositor send a fresh
+  `wl_keyboard.keymap` to the focused surface. The harness then sent raw evdev
+  keycode 44 instead of a keysym, so the character can only come from the
+  client's current keymap. A `switchxkblayout` on a physical device was not
+  used.
+- After the run, `HDMI-A-1` was returned to scale 1 and the full suite passed
+  again.
 
 ## Acceptance matrix
 
