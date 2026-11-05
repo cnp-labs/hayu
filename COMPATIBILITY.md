@@ -54,6 +54,8 @@ Do not make the entire session depend on a particular systemd user service witho
 
 | 2026-11-05 | 1785746 | 0.57.0 | Arch Linux, kernel 7.2.14-zen1 | AMD Radeon R7 200 (RADV OLAND, Mesa 26.2.6) | 1 × HDMI-A-1 1366×768 scale 1 | Launcher slice: `hayu-launcher` overlay opens and closes through the control socket, `quit` exits 0, a second instance refuses to bind, a missing shell reports a clear error, and a scale-2 frame renders offscreen | Desktop-entry scan and key handling covered by unit tests; live typing not exercised (no wtype/ydotool), IME and key repeat not verified |
 
+| 2026-11-05 | 10fbb4c | 0.57.0 | Arch Linux, kernel 7.2.14-zen1 | AMD Radeon R7 200 (RADV OLAND, Mesa 26.2.6) | 1 × HDMI-A-1 1366×768 scale 1 | Launcher driven with injected `zwp_virtual_keyboard_v1` events: open, type, navigate, launch, close, reopen, held-key repeat, empty results and launch errors all behaved; terminal entries run in foot; `quit` exits 0 | Keyboard repeat comes from the compositor's `repeat_info`; IME, runtime keymap changes, scale 2, and multi-monitor were not exercised |
+
 These rows cover surface creation, text drawing, Hyprland snapshot/event handling, renderer presentation, launcher control and keyboard mapping, and clean shutdown on a single output. They do not cover IME, fractional scaling, multi-monitor, hotplug, tray, audio, notifications, or accessibility; those were not exercised.
 
 Releases list tested version ranges, known issues, protocol gaps, and optional dependencies. Other distributions may be tried on a best-effort basis, but must not be labeled supported before testing.

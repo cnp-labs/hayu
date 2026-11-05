@@ -12,7 +12,7 @@ both surfaces still draw through tiny-skia until M1.
 
 ```
 cargo build --release
-cargo test                                 # 36 unit tests
+cargo test                                 # 38 unit tests
 ./target/release/hayu doctor               # works without a shell running
 ./target/release/hayu config check examples/config.toml
 ./target/release/hayu run                  # needs a live Hyprland session
@@ -81,11 +81,22 @@ support in V1.
   thread on accept or file IO.
 - Launcher keyboard interactivity is `Exclusive` only while the overlay is open
   and `None` for the bar. Only one redraw path exists; do not add timers or
-  per-keystroke desktop scans (entries are scanned once at startup).
+  per-keystroke desktop scans (entries are rescanned once per open).
 - Desktop-entry rules live in `src/desktop.rs`: `[Desktop Entry]` only,
   `Type=Application`, honour `Hidden`/`NoDisplay`/`OnlyShowIn`/`TryExec`, strip
-  the allowed `%` field codes and reject unknown ones, spawn an argument vector
-  and never a shell, refuse `Terminal=true` instead of guessing a terminal.
+  the allowed `%` field codes and reject unknown ones, and spawn an argument
+  vector and never a shell. The catalogue is rescanned on every launcher open
+  (a few ms), so installed entries appear without a restart.
+- `Terminal=true` entries run as `<terminal> -e <argv>`, with `$TERMINAL`
+  preferred and a short emulator list as fallback; a missing emulator is an
+  error shown in the footer, not a silent no-op.
+- `HAYU_DEBUG_KEYS=1` traces keysyms, query, selection and per-frame draw time;
+  `HAYU_DEBUG_SCAN=1` traces the scan duration. Both are off by default and are
+  what the live input check asserts on. Do not log query text without them.
+- The launcher surface is reused across opens: closing detaches the buffer and
+  clears `configured`, opening re-requests a configure and paints only from
+  that event. Attaching a buffer before a fresh configure makes the compositor
+  error out and the overlay never maps again.
 - `src/config.rs` is the only schema consumer today. Adding a key there is not
   implementation work; the module that uses it still has to exist.
 - GL backend: every output owns an EGL context, so `make_current` before each

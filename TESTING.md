@@ -1,6 +1,6 @@
 # Testing strategy and release gate
 
-Status: plan with a partial M0 suite. `cargo test` runs 36 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, control-socket framing and permissions, key mapping, and a rendered launcher frame. The renderer spike produced offscreen pixel comparisons (ADR-0006) and live surface checks, and the launcher was exercised live through the control socket. No T-01–T-20 acceptance result exists, and IME, screen-reader, soak, and multi-monitor tests have not been run.
+Status: plan with a partial M0 suite. `cargo test` runs 38 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists, and IME, screen-reader, soak, and multi-monitor tests have not been run.
 
 ## Testing layers
 
@@ -9,6 +9,50 @@ Status: plan with a partial M0 suite. `cargo test` runs 36 unit tests covering c
 - Render: shape/text/clip golden scenes with controlled font/scale and antialiasing tolerance; snapshots do not replace interaction tests.
 - Integration: nested Hyprland when suitable, and actual hardware for GPU, hotplug, input, backlight, IME, and screen readers.
 - Soak/performance: follow [PERFORMANCE.md](PERFORMANCE.md); do not write tests that merely mirror implementation.
+
+## Launcher live input check (November 5, 2026)
+
+Run at commit `10fbb4c` on the target machine (Hyprland 0.57.0, one output, scale 1). Keys were sent as real Wayland input through a throwaway `zwp_virtual_keyboard_v1` client; the shell was observed through `HAYU_DEBUG_KEYS=1` and `HAYU_DEBUG_SCAN=1` traces plus `hyprctl layers -j`, because no screenshot tool is installed. The driver is not in the repository.
+
+| Check | Result |
+| --- | --- |
+| `launcher toggle` maps the overlay and the second toggle unmaps it | Live pass |
+| Typed query `hayu test` reaches the launcher and filters to three entries | Live pass |
+| Down changes the selection, Enter launches it and closes the overlay | Live pass |
+| Launched command actually ran (file created by `Exec`) | Live pass |
+| Reopening after a launch maps the surface again, no protocol error | Live pass |
+| Empty results for an unmatched query | Live pass |
+| Held Backspace repeats and deletes several characters from one press | Live pass |
+| Escape closes; reopening resets the query | Live pass |
+| `Terminal=true` entry runs inside foot and closes the overlay | Live pass |
+| Failing `Exec` keeps the overlay open and reports the error | Live pass |
+| `hayu quit` exits 0 and the socket is removed | Live pass |
+| IME, key repeat after a real compositor keymap change, multi-monitor, scale 2 | Not tested |
+
+Unit tests still own the parts the live run cannot isolate: Exec tokenization and field-code rejection, desktop-ID deduplication, filter ordering, terminal resolution, socket framing and permissions, and key mapping.
+
+### Method and limits
+
+- Harness: a throwaway client bound `zwp_virtual_keyboard_v1` on the Hyprland
+  seat, uploaded a `us` keymap built with xkbcommon, and sent press/release
+  pairs 20 ms apart (one held press for the repeat check). It lives outside the
+  repository; no package was installed to run it.
+- Observation: `HAYU_DEBUG_KEYS=1` printed keysym, UTF-8, query, selection,
+  result count, first names and per-frame draw time; `HAYU_DEBUG_SCAN=1`
+  printed the scan duration; `hyprctl layers -j` confirmed whether the overlay
+  was mapped. This machine has no screenshot tool, so no pixel diff was taken.
+- Isolation: test entries were written under a temporary `XDG_DATA_HOME` and
+  launched commands only touched files in `/tmp`, so no user application was
+  started by the check.
+- Performance numbers come from the same live session: PSS from
+  `/proc/<pid>/smaps_rollup`, idle CPU from `utime+stime` in `/proc/<pid>/stat`,
+  wakeups from `/proc/<pid>/status`, frame times from the debug trace over 16
+  frames including the cold first frame, and the CLI round trip measured around
+  `hayu launcher toggle`.
+- Limits: one 1366×768 output at scale 1, 46 desktop entries, one session, one
+  idle sample; no multi-monitor, fractional scale or IME. The CLI round trip
+  ends when the control socket answers, so surface-map latency is not isolated,
+  and no GPU metric was collected for the launcher.
 
 ## Acceptance matrix
 
