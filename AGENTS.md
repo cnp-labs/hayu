@@ -2,31 +2,36 @@
 
 Hayu is a Rust Wayland desktop shell for Hyprland. The repository holds the V1
 planning baseline (Markdown is the specification) plus an **M0 prototype**
-in `src/`: one layer-shell bar, `hayu config check`, `hayu doctor`, and a
-renderer spike binary. There is no V1 feature beyond the bar and no packaging or
-CI. The renderer is decided: GLES/EGL with glow, CPU path for tests only
-(ADR-0006); the bar itself still draws through tiny-skia until M1.
+in `src/`: one layer-shell bar, a keyboard launcher reachable over a local
+control socket, `hayu config check`, `hayu doctor`, and a renderer spike binary.
+There is no V1 feature beyond the bar and launcher, and no packaging or CI. The
+renderer is decided: GLES/EGL with glow, CPU path for tests only (ADR-0006);
+both surfaces still draw through tiny-skia until M1.
 
 ## Verified commands
 
 ```
 cargo build --release
-cargo test                                 # 11 unit tests
+cargo test                                 # 36 unit tests
 ./target/release/hayu doctor               # works without a shell running
 ./target/release/hayu config check examples/config.toml
 ./target/release/hayu run                  # needs a live Hyprland session
+./target/release/hayu launcher toggle      # needs `hayu run`; also open|close
+./target/release/hayu quit                 # stops the running shell
 ./target/release/hayu-gpu-spike --backend gl --mode offscreen --frames 300 --json
 cargo build --release --features wgpu      # opt-in backend for the spike only
 ```
 
 `hayu run` maps a real bar over the user's desktop and blocks. Use a timeout for
 smoke checks and stop it with SIGTERM; do not leave it running. `hayu run` reads
-only `$XDG_CONFIG_HOME/hayu/config.toml` (no `--config` flag yet).
+only `$XDG_CONFIG_HOME/hayu/config.toml` (no `--config` flag yet). Client
+commands talk to `$XDG_RUNTIME_DIR/hayu/<session-id>/control.sock`; without a
+running shell they exit non-zero with a readable message.
 
 ## Do not overclaim
 
 - Never write that a V1 capability is implemented, tested, benchmarked, or
-  supported. Only the bar, config validation, and `doctor` exist; TESTING.md and
+  supported. Only the bar, launcher slice, config validation, and `doctor` exist; TESTING.md and
   PERFORMANCE.md record that no T-01–T-20 result and no V1 profile measurement
   exists.
 - `DECISIONS.md` is the authority on status: **D-01..D-09 user-decided**,
@@ -69,6 +74,18 @@ support in V1.
   and the exact minute tick; do not add a frame loop or per-widget polling.
 - The Hyprland adapter owns both sockets; widgets must not talk to them
   directly. Reconnects request a resync before trusting state again.
+- The control socket is not the Hyprland socket: `src/ipc.rs` owns
+  `$XDG_RUNTIME_DIR/hayu/<session>/control.sock` (0700 dir, 0600 socket,
+  protocol v1, 4 KiB request cap, 1 s timeout). It runs as a calloop source,
+  reads on a worker thread, and answers on the UI thread; do not block the UI
+  thread on accept or file IO.
+- Launcher keyboard interactivity is `Exclusive` only while the overlay is open
+  and `None` for the bar. Only one redraw path exists; do not add timers or
+  per-keystroke desktop scans (entries are scanned once at startup).
+- Desktop-entry rules live in `src/desktop.rs`: `[Desktop Entry]` only,
+  `Type=Application`, honour `Hidden`/`NoDisplay`/`OnlyShowIn`/`TryExec`, strip
+  the allowed `%` field codes and reject unknown ones, spawn an argument vector
+  and never a shell, refuse `Terminal=true` instead of guessing a terminal.
 - `src/config.rs` is the only schema consumer today. Adding a key there is not
   implementation work; the module that uses it still has to exist.
 - GL backend: every output owns an EGL context, so `make_current` before each
@@ -95,5 +112,6 @@ support in V1.
 
 `README.md` → `PRD.md` → `SCOPE.md` → `DECISIONS.md` → `ROADMAP.md` for intent;
 `src/main.rs` → `src/bar.rs` → `src/hyprland.rs` for the code,
+`src/launcher.rs` → `src/desktop.rs` → `src/ipc.rs` for the launcher slice,
 `src/gpu/` for the renderer spike; `docs/adr/` for the reasoning behind locked
 choices.

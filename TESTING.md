@@ -1,6 +1,6 @@
 # Testing strategy and release gate
 
-Status: plan with a partial M0 suite. `cargo test` runs 11 unit tests covering config validation, Hyprland event parsing, clock formatting, and title ellipsization. No contract, render, integration, hardware, IME, screen-reader, or soak test has been run, and none of the T-01–T-20 acceptance results exist.
+Status: plan with a partial M0 suite. `cargo test` runs 36 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, control-socket framing and permissions, key mapping, and a rendered launcher frame. The renderer spike produced offscreen pixel comparisons (ADR-0006) and live surface checks, and the launcher was exercised live through the control socket. No T-01–T-20 acceptance result exists, and IME, screen-reader, soak, and multi-monitor tests have not been run.
 
 ## Testing layers
 

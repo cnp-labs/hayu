@@ -33,7 +33,7 @@ Contracts cover measure constraints, layout bounds, clip, input bounds, focusabi
 | Surface          | Behavior                                                                                                                                       |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | Bar              | Top/bottom, left/center/right areas; ellipsized titles; labeled indicators/tooltips; missing items do not break layout                         |
-| Launcher         | Focus input on open; reset query on reopening by default; arrows select, Enter activates, Escape closes; clear empty results and launch errors |
+| Launcher         | Focus input on open; reset query on reopening by default; arrows select, Enter activates, Escape closes; clear empty results and launch errors. M0 slice: 560×420 overlay, eight rows, keyboard interactivity only while open; icons, IME, and favorites are not implemented |
 | Control center   | Group audio, brightness, network, and battery; show pending/permissions; keyboard reaches every control                                        |
 | Tray/menu        | Keep menus inside output bounds, scroll long menus, consistent keyboard navigation/dismissal                                                   |
 | Notifications    | Toasts do not steal focus; default to focused output; hover may hold timeout; history panel offers clear/DND                                   |
