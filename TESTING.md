@@ -1,6 +1,6 @@
 # Testing strategy and release gate
 
-Status: plan. No application test suite or Hyprland session has been run for this package.
+Status: plan with a partial M0 suite. `cargo test` runs 11 unit tests covering config validation, Hyprland event parsing, clock formatting, and title ellipsization. No contract, render, integration, hardware, IME, screen-reader, or soak test has been run, and none of the T-01–T-20 acceptance results exist.
 
 ## Testing layers
 

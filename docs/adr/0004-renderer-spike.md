@@ -11,3 +11,6 @@ Measure startup, idle, text quality, resize/hotplug, GPU/driver compatibility, P
 ## Criteria and results
 
 Surface/lifecycle correctness comes first, followed by hardware compatibility, resources, debugging, maintenance, and licensing. Do not choose GLES merely because Noctalia uses it. M0 produces a report with commit/config/environment, samples, limitations, and a recommendation. Change status to accepted after the maintainer decision; record rejection reasons for alternatives. No benchmark results exist yet.
+
+## M0 observation (November 5, 2026)
+A CPU path (tiny-skia into `wl_shm`) now exists in `src/render.rs` and carries the prototype bar, so surfaces, text, scaling, and hotplug can be exercised before the GPU backends are ready. Nothing here is a renderer recommendation: GLES/EGL and wgpu have not been implemented or measured, so the comparison this ADR requires is still open.

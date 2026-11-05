@@ -1,6 +1,6 @@
 # Compatibility targets
 
-Status: testing plan; **no hardware/version combination has been declared tested**.
+Status: testing plan. One M0 prototype record exists for the developer machine; no V1 capability, release, or additional hardware has been declared tested.
 
 ## Initial targets
 
@@ -48,6 +48,8 @@ Do not make the entire session depend on a particular systemd user service witho
 
 | Date | Hayu commit | Hyprland | Distribution/kernel | GPU/driver | Monitors/scale | Modules/results | Sanitized logs |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Not tested | — | — | — | — | — | — | — |
+| 2026-11-05 | 02a7687 | 0.57.0 | Arch Linux, kernel not recorded | AMD Radeon R7 240 (Oland PRO), driver not recorded | 1 × HDMI-A-1, 1366×768, scale 1 | M0 bar only: layer maps, namespaces `hayu`, workspaces/clock/title render; `doctor` and `config check` work; SIGTERM exits 0 | PSS 5.6 MiB; idle CPU 0.07% of one core over 30 s |
+
+This row covers surface creation, text drawing, Hyprland snapshot/event handling, and clean shutdown on a single output. It does not cover input, IME, fractional scaling, multi-monitor, hotplug, tray, audio, notifications, or accessibility; none of those were exercised.
 
 Releases list tested version ranges, known issues, protocol gaps, and optional dependencies. Other distributions may be tried on a best-effort basis, but must not be labeled supported before testing.

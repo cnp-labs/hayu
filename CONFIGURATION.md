@@ -1,6 +1,6 @@
 # Configuration, state, and IPC
 
-Status: **schema v1 design**, not an available executable API. TOML is user-decided; the keys/defaults below are baseline proposals. Full example: [examples/config.toml](examples/config.toml).
+Status: **schema v1 design**. `hayu config check` validates the schema today; only bar/clock/appearance keys affect a running process, and no other module exists yet. TOML is user-decided; the keys/defaults below are baseline proposals. Full example: [examples/config.toml](examples/config.toml).
 
 ## Locations and precedence
 
@@ -66,4 +66,4 @@ Proposed contract: `hayu run`; `hayu doctor`; `hayu config check`; `hayu config 
 
 The CLI uses the correct session endpoint, exits nonzero on errors, and provides actionable messages. `doctor` remains useful when the daemon is not running. IPC has a protocol version, request ID, size limits, timeouts, and owner-only permissions. It does not expose arbitrary command execution.
 
-Write final Hyprland keybinding/autostart examples after recording the target Hyprland configuration version; do not copy untested legacy syntax. All CLI commands here are plans, not installation steps already proven to work.
+Write final Hyprland keybinding/autostart examples after recording the target Hyprland configuration version; do not copy untested legacy syntax. Only `run`, `doctor`, and `config check` exist in the M0 slice; every other command here is a plan, not an installation step already proven to work.

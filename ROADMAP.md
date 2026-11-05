@@ -16,6 +16,9 @@ Status: proposed work sequence without calendar deadlines. Every user-selected f
 
 M2/M3 alphas may be shared for testing with recorded limitations; only label V1 complete after M6. Milestones divide implementation work rather than reducing feature obligations.
 
+## M0 status (November 5, 2026)
+Implemented in `src/`: layer-shell bar per output with hotplug, tiny-skia CPU drawing into wl_shm, cosmic-text labels, Hyprland snapshot plus event resync, `hayu config check`, and `hayu doctor`. Still open for M0: input handling, the GLES/EGL and wgpu prototypes, the resource baseline for candidate renderers, and therefore the renderer decision (O-01). The bar is a prototype, not a V1 bar: no launcher, tray, panels, or theming beyond the prototype tokens.
+
 ## Risk priorities
 
 1. Prove text/IME, fractional scaling, and accessibility before many surfaces depend on UI APIs.

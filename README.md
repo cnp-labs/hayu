@@ -4,7 +4,7 @@
 
 Hayu is a Rust-based Wayland desktop shell for Hyprland users, with an internal UI foundation and TOML configuration. Noctalia is a reference for an integrated desktop experience; Hayu's requirements and implementation are defined independently.
 
-**Status: planning documentation v0.1, November 2, 2026 (Asia/Jakarta). This package contains no verified implementation or benchmark results.** “First release” means the first product release that meets the entire V1 scope, rather than the M0 prototype.
+**Status: M0 prototype, November 5, 2026 (Asia/Jakarta).** The planning documents below still define V1. The repository now also contains an M0 code slice: a layer-shell bar with workspaces, clock, and window title, `hayu config check`, and `hayu doctor`. No V1 feature beyond the bar exists, no renderer decision has been made, and no benchmark of the V1 profiles has been run. “First release” means the first product release that meets the entire V1 scope, rather than this M0 prototype.
 
 ## User decisions
 
@@ -40,7 +40,15 @@ Hayu is a Rust-based Wayland desktop shell for Hyprland users, with an internal 
 
 Start with M0 in [ROADMAP.md](ROADMAP.md). The first deliverable is a prototype covering surfaces, text, input, and scaling in Hyprland; then implement modules incrementally until all V1 requirements are met. This stage does not require a marketplace or plugin runtime.
 
-[examples/config.toml](examples/config.toml) is a **proposed schema example**, not configuration for an available binary. All CLI names, IPC service names, module paths, and design tokens in these documents are proposals until implementation stabilizes them. No installation commands are claimed to work already.
+[examples/config.toml](examples/config.toml) is a **proposed schema example**: `hayu config check` validates it, but most keys describe modules that do not exist yet. All CLI names, IPC service names, module paths, and design tokens in these documents remain proposals until implementation stabilizes them. The M0 slice builds and runs in a Hyprland session:
+
+```
+cargo build --release
+cargo test
+./target/release/hayu doctor
+./target/release/hayu config check examples/config.toml
+./target/release/hayu run
+```
 
 ## Decision status
 

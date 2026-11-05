@@ -1,6 +1,6 @@
 # Hayu architecture
 
-Status: initial design 0.1, not a description of an existing implementation. The user decided on internal UI/Rust/Hyprland/TOML; the following module organization and process model are proposals.
+Status: initial design 0.2. The user decided on internal UI/Rust/Hyprland/TOML; the module organization and process model below remain proposals. `src/` implements only an M0 slice: Wayland surfaces, the Hyprland adapter, the CPU render path, the bar, config validation, and `doctor`.
 
 ## 1. System boundaries and modules
 
