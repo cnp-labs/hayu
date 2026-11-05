@@ -35,7 +35,10 @@ impl Entry {
 }
 
 pub fn scan() -> Vec<Entry> {
-    let dirs = data_dirs();
+    let dirs: Vec<PathBuf> = data_dirs()
+        .iter()
+        .map(|dir| dir.join("applications"))
+        .collect();
     let current = std::env::var("XDG_CURRENT_DESKTOP").ok();
     scan_in(&dirs, current.as_deref())
 }
@@ -605,6 +608,28 @@ mod tests {
         assert!(parse_exec("app %").is_err());
     }
 
+    #[test]
+    fn desktop_ids_are_relative_to_the_applications_directory() {
+        let data = temp_dir("data");
+        write(
+            &data.join("applications/app.desktop"),
+            "[Desktop Entry]\nType=Application\nName=App\nExec=app\n",
+        );
+        write(
+            &data.join("applications/sub/nested.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Nested\nExec=nested\n",
+        );
+        write(
+            &data.join("elsewhere/other.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Other\nExec=other\n",
+        );
+        let entries = scan_in(&[data.join("applications")], None);
+        let ids: Vec<&str> = entries.iter().map(|e| e.desktop_id.as_str()).collect();
+        assert!(ids.contains(&"app.desktop"), "{ids:?}");
+        assert!(ids.contains(&"sub-nested.desktop"), "{ids:?}");
+        assert!(!ids.iter().any(|id| id.starts_with("applications-")), "{ids:?}");
+        let _ = std::fs::remove_dir_all(data);
+    }
     #[test]
     fn deduplicates_by_desktop_id_with_first_directory_winning() {
         let first = temp_dir("first");
