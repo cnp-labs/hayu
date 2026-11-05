@@ -1,0 +1,62 @@
+# Hayu: proposed schema; no implementation binary is available yet.
+# See CONFIGURATION.md for key/default contracts.
+schema_version = 1
+
+[appearance]
+mode = "dark"
+accent = "#8AB4F8"
+animations = false
+reduce_motion = false
+
+[bar]
+enabled = true
+position = "top"
+height = 32
+outputs = ["*"]
+left = ["launcher", "workspaces", "active_window"]
+center = ["clock"]
+right = ["media", "audio", "network", "battery", "tray", "notifications", "control_center"]
+
+[clock]
+format = "%H:%M"
+
+[launcher]
+enabled = true
+favorites = [] # Desktop IDs, not shell commands.
+
+[tray]
+enabled = true
+
+[notifications]
+enabled = true
+dnd = false
+history_limit = 100 # Session-only; not persisted to disk.
+
+[control_center]
+audio = true
+brightness = true
+network = true
+battery = true
+
+[media]
+enabled = true
+
+[osd]
+enabled = true
+
+[wallpaper]
+enabled = true
+directories = [] # Add local image directories.
+mode = "fill"
+
+[wallpaper.outputs]
+# "eDP-1" = "/path/to/wallpaper.png"
+
+[dock]
+enabled = true
+pinned = [] # Desktop IDs; interactive changes go into state.
+
+[clipboard]
+enabled = false # Capture starts after opt-in.
+max_entries = 100
+max_item_bytes = 65536
