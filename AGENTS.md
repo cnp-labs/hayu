@@ -12,7 +12,7 @@ both surfaces still draw through tiny-skia until M1.
 
 ```
 cargo build --release
-cargo test                                 # 39 unit tests
+cargo test                                 # 40 unit tests
 ./target/release/hayu doctor               # works without a shell running
 ./target/release/hayu config check examples/config.toml
 ./target/release/hayu run                  # needs a live Hyprland session
@@ -90,8 +90,9 @@ support in V1.
 - `Terminal=true` entries run in a terminal found from `$TERMINAL` or a short
   fallback list, and the argument form is per emulator: foot takes the command
   positionally, alacritty/ghostty/konsole/xterm use `-e`, kitty uses `--`, and
-  wezterm needs `start --`. `$TERMINAL` is assumed to accept `-e`. A missing
-  emulator is an error shown in the footer, not a silent no-op.
+  wezterm needs `start --`. A known emulator in `$TERMINAL` keeps its form; an
+  unknown one is assumed to accept `-e`. A missing emulator is an error shown
+  in the footer, not a silent no-op.
 - `HAYU_DEBUG_KEYS=1` traces keysyms, query, selection and per-frame draw time;
   `HAYU_DEBUG_SCAN=1` traces the scan duration. Both are off by default and are
   what the live input check asserts on. Do not log query text without them.
