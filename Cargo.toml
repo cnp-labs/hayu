@@ -3,8 +3,19 @@ name = "hayu"
 version = "0.1.0"
 edition = "2024"
 description = "Hayu desktop shell prototype (M0)"
+license = "MIT"
+
+[features]
+default = ["gl"]
+gl = ["dep:glutin", "dep:glow", "dep:raw-window-handle"]
+wgpu = ["dep:wgpu", "dep:raw-window-handle", "dep:pollster"]
 
 [dependencies]
+glutin = { version = "0.32.3", optional = true }
+glow = { version = "0.18.0", optional = true }
+pollster = { version = "1.0.1", optional = true }
+raw-window-handle = { version = "0.6.2", optional = true }
+wgpu = { version = "30.0.1", optional = true, default-features = false, features = ["std", "vulkan", "wgsl"] }
 calloop = { version = "0.14", features = ["signals"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cosmic-text = "0.19"
@@ -12,5 +23,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smithay-client-toolkit = { version = "0.21", features = ["calloop"] }
 tiny-skia = "0.12"
+libc = "0.2"
 toml = "1"
+wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
+
+[[bin]]
+name = "hayu-gpu-spike"
+path = "src/bin/gpu_spike.rs"
