@@ -13,17 +13,60 @@ pub struct Entry {
     pub terminal: bool,
 }
 
+const TERMINAL_CANDIDATES: [&str; 7] = [
+    "foot", "alacritty", "kitty", "wezterm", "ghostty", "konsole", "xterm",
+];
+
+/// `$TERMINAL` wins when it names an executable on `PATH`, then a short list of
+/// common emulators. Returns the program, never a shell string.
+fn pick_terminal(env_terminal: Option<&str>, path: &[PathBuf]) -> Option<PathBuf> {
+    let find = |name: &str| {
+        path.iter()
+            .map(|dir| dir.join(name))
+            .find(|candidate| is_executable(candidate))
+    };
+    if let Some(value) = env_terminal
+        && let Some(name) = value.split_whitespace().next()
+        && let Some(found) = find(name)
+    {
+        return Some(found);
+    }
+    TERMINAL_CANDIDATES.iter().find_map(|name| find(name))
+}
+
+fn terminal_program() -> Option<PathBuf> {
+    let path: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default();
+    pick_terminal(std::env::var("TERMINAL").ok().as_deref(), &path)
+}
+
 impl Entry {
-    pub fn launch(&self) -> Result<(), String> {
-        if self.terminal {
-            return Err("terminal entries are not supported yet".into());
-        }
+    fn command(&self, terminal: Option<PathBuf>) -> Result<Command, String> {
         let (program, args) = self
             .exec
             .split_first()
             .ok_or_else(|| "desktop entry has an empty Exec".to_string())?;
-        let mut child = Command::new(program)
-            .args(args)
+        if !self.terminal {
+            let mut command = Command::new(program);
+            command.args(args);
+            return Ok(command);
+        }
+        let terminal = terminal.ok_or_else(|| {
+            format!(
+                "{} needs a terminal, but no terminal emulator was found in PATH (set $TERMINAL)",
+                self.name
+            )
+        })?;
+        let mut command = Command::new(terminal);
+        command.arg("-e");
+        command.args(&self.exec);
+        Ok(command)
+    }
+
+    pub fn launch(&self) -> Result<(), String> {
+        let mut child = self
+            .command(if self.terminal { terminal_program() } else { None })?
             .spawn()
             .map_err(|e| format!("cannot launch {}: {e}", self.name))?;
         // Reap the child without making the UI wait for the application to exit.
@@ -727,10 +770,39 @@ mod tests {
     }
 
     #[test]
-    fn terminal_entries_refuse_to_launch() {
+    fn terminal_program_prefers_env_then_known_emulators() {
+        let dir = temp_dir("term");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("myterm");
+        write(&fake, "#!/bin/sh\n");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = vec![bin.clone()];
+        assert_eq!(pick_terminal(Some("myterm"), &path), Some(fake.clone()));
+        assert_eq!(pick_terminal(Some("missing --flag"), &path), None);
+        assert_eq!(pick_terminal(None, &path), None, "only listed names count");
+        let foot = bin.join("foot");
+        write(&foot, "#!/bin/sh\n");
+        std::fs::set_permissions(&foot, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(pick_terminal(None, &path), Some(foot));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn terminal_entries_wrap_the_command_or_explain() {
         let mut entry = entry("x.desktop", "X");
+        entry.exec = vec!["btop".into(), "--utf".into()];
+        let plain = entry.command(None).unwrap();
+        assert_eq!(plain.get_program(), "btop");
+        assert_eq!(plain.get_args().collect::<Vec<_>>(), ["--utf"]);
         entry.terminal = true;
-        let error = entry.launch().unwrap_err();
-        assert!(error.contains("terminal entries are not supported yet"));
+        let wrapped = entry.command(Some(PathBuf::from("/usr/bin/foot"))).unwrap();
+        assert_eq!(wrapped.get_program(), "/usr/bin/foot");
+        assert_eq!(
+            wrapped.get_args().collect::<Vec<_>>(),
+            ["-e", "btop", "--utf"]
+        );
+        let error = entry.command(None).unwrap_err();
+        assert!(error.contains("no terminal emulator"), "{error}");
     }
 }
