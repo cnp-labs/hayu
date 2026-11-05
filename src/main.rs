@@ -1,4 +1,6 @@
 mod config;
+mod doctor;
+mod hyprland;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -6,6 +8,7 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [command] if command == "doctor" => ExitCode::from(doctor::run() as u8),
         [group, command] if group == "config" && command == "check" => check(None),
         [group, command, path] if group == "config" && command == "check" => {
             check(Some(PathBuf::from(path)))
@@ -40,6 +43,7 @@ fn usage() {
         "hayu 0.1.0 (M0 prototype)\n\
          \n\
          Usage:\n\
+         \x20 hayu doctor\n\
          \x20 hayu config check [PATH]\n"
     );
 }
