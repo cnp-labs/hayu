@@ -378,7 +378,8 @@ impl State {
                 }
             }
         }
-        self.draw_launcher();
+        // The draw happens on the configure event for this open; painting here
+        // would attach a buffer before the compositor reconfigured the surface.
         Ok(())
     }
 
@@ -727,7 +728,9 @@ impl LayerShellHandler for State {
         {
             self.launcher
                 .resize(configure.new_size.0, configure.new_size.1);
-            self.draw_launcher();
+            if self.launcher.is_open() {
+                self.draw_launcher();
+            }
             return;
         }
         let fallback = self.cfg.bar.height.clamp(1, 4096) as u32;

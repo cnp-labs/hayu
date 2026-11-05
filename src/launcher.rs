@@ -72,11 +72,14 @@ impl Surface {
         self.layer.wl_surface() == layer.wl_surface()
     }
 
-    fn hide(&self) {
+    fn hide(&mut self) {
         self.layer
             .set_keyboard_interactivity(KeyboardInteractivity::None);
         self.layer.wl_surface().attach(None, 0, 0);
         self.layer.commit();
+        // wlroots requires a fresh configure before the next buffer, and a
+        // configure event must not paint a closed launcher.
+        self.configured = false;
     }
 }
 
@@ -122,10 +125,14 @@ impl Launcher {
         self.error = None;
         self.recompute();
         self.open = true;
-        if let Some(surface) = &self.surface {
+        if let Some(surface) = &mut self.surface {
+            surface.configured = false;
             surface
                 .layer
                 .set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+            // Commit without a buffer so the compositor sends a configure for
+            // the new interactivity state before anything is attached.
+            surface.layer.commit();
         }
     }
 
@@ -138,7 +145,7 @@ impl Launcher {
     }
 
     pub fn close(&mut self) {
-        if let Some(surface) = &self.surface {
+        if let Some(surface) = &mut self.surface {
             surface.hide();
         }
         self.open = false;
@@ -246,7 +253,7 @@ impl Launcher {
         let Some(surface) = &mut self.surface else {
             return;
         };
-        if !surface.configured {
+        if !self.open || !surface.configured {
             return;
         }
         let Some(pixmap) = draw_frame(
