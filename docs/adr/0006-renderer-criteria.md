@@ -1,8 +1,9 @@
 # ADR-0006 — Renderer selection criteria and M0 GPU spike
 
-Date: November 5, 2026. Status: **proposed — criteria fixed before measurement**.
+Date: November 5, 2026. Status: **accepted — GLES/EGL with glow**, CPU path retained.
 Supersedes the experiment plan in [ADR-0004](0004-renderer-spike.md); ADR-0004
-stays as the record of why the question was opened.
+stays as the record of why the question was opened. Results and scores are in
+the section at the end of this document.
 
 ## Context
 
@@ -95,3 +96,103 @@ After results are appended, this ADR changes status to accepted or rejected with
 per-criterion evidence, DECISIONS.md O-01 is updated, and the losing backend is
 removed unless it is kept as a documented fallback. The CPU path is retained for
 tests regardless of the outcome.
+
+## Results (November 5, 2026)
+
+Spike commit: `df68feb`. Binary: `hayu-gpu-spike`; default build enables only
+the `gl` feature, the wgpu backend is opt-in via `--features wgpu`.
+
+Commands used (release build, same scene for all backends):
+
+```
+cargo build --release
+cargo build --release --features wgpu
+./target/release/hayu-gpu-spike --backend {cpu|gl|wgpu} --mode offscreen --frames 300 --dump /tmp/x.ppm --json
+./target/release/hayu-gpu-spike --backend {gl|wgpu} --mode present --frames N --hold S --json
+```
+
+Environment: Arch Linux, kernel 7.2.14-zen1, Intel i3-2120, AMD Radeon R7 200
+(RADV OLAND, Mesa 26.2.6), Vulkan 1.3.354, Hyprland 0.57.0, one 1366×768 output
+at scale 1, Rust 1.99.1.
+
+### Hard gates
+
+| Gate | GLES/EGL | wgpu | Evidence |
+| --- | --- | --- | --- |
+| G1 Surface lifecycle | Pass | Pass | Layer `hayu-gpu-spike` mapped on HDMI-A-1 and on a temporary headless output; output add and remove survived without panic; SIGTERM exits 0. Scale-change re-render is implemented but could not be exercised live (see limitations). |
+| G2 Text quality | Pass | Pass | Glyphs rasterized once into an atlas, sampled from a texture; captured frame shows correct pills, clock, title and image at 100% and 200% scale. |
+| G3 Compatibility | Pass | Pass | Mesa/radeonsi and RADV respectively, no proprietary driver. GL falls back to llvmpipe when forced; wgpu reports `no Vulkan adapter: ...` and exits 1 when no driver is loadable. |
+| G4 Determinism | Pass | Pass | gl and wgpu frames are bit-identical (MAD 0); versus the CPU reference MAD is 8.31/65535 (0.0127%) at scale 1 and 5.63/65535 (0.0086%) at scale 2. |
+| G5 Licensing | Pass | Pass | All added dependencies are MIT/Apache-2.0/BSD/ISC/Zlib; no binary blobs. `cargo metadata` reports no copyleft-only package. |
+
+Both backends pass every gate. The GL backend initially failed output hotplug
+with `swap buffers: ... argument does not name a valid surface`; the cause was
+one EGL context per output with no `make_current` before drawing, and the fix is
+part of this spike. That defect is counted under S3 and S5, not hidden.
+
+### Measurements
+
+| Metric | GLES/EGL | wgpu | CPU (reference) |
+| --- | --- | --- | --- |
+| Cold start to first presented frame, p50 of 3 runs | 172.0 ms | 140.7 ms | n/a |
+| Offscreen 300 frames, p50 (median of 3 runs) | 0.095 ms | 0.125 ms | 0.538 ms |
+| Offscreen 300 frames, p95 (median of 3 runs) | 0.124 ms | 0.146 ms | 0.600 ms |
+| Offscreen 100 frames at scale 2, p50 (1 run) | 0.225 ms | 0.179 ms | 1.952 ms |
+| Idle PSS, one 1366×32 bar (samples) | ≈50 MiB (34.8–55.1) | ≈32.6 MiB (29.6–42.4) | 5.6 MiB |
+| Idle CPU while holding the surface | <0.03% of one core | <0.03% of one core | <0.07% |
+| Voluntary wakeups while idle | 0 in 20–25 s | 0 in 20–25 s | 0 |
+| Cold build from scratch (`CARGO_TARGET_DIR` empty) | 222 s | 391 s | 118 s core only |
+| Normal dependency count | 127 (+9 over core) | 171 (+53 over core) | 118 |
+| Backend-specific lines of code | 590 | 584 | 182 |
+
+Present-mode frame times are not comparable: wgpu presents with the Vulkan FIFO
+model and therefore reports one frame per refresh (~16.7 ms), while the GL path
+uses `SwapInterval::DontWait` and reports GPU time (~0.17 ms p50). The offscreen
+numbers above are the like-for-like comparison.
+
+### Scores
+
+| ID | Criterion | Weight | GLES/EGL | wgpu | Basis |
+| --- | --- | --- | --- | --- | --- |
+| S1 | Resources | 25% | 3 | 4 | PSS ≈50 vs ≈32.6 MiB; idle CPU and wakeups equal. |
+| S2 | Latency | 20% | 4 | 4 | wgpu starts 31 ms sooner; GL frame work is ~24% cheaper at scale 1, wgpu faster at scale 2. Both are far below any frame budget. |
+| S3 | Integration and maintenance | 20% | 4.5 | 2.5 | +9 vs +53 dependencies, 222 s vs 391 s cold build, similar LOC; the GL context fix shows raw-FFI risk. |
+| S4 | Compatibility and fallback | 15% | 4 | 3 | GL runs on llvmpipe without a GPU; wgpu has no software Vulkan here and needs its GL backend enabled for that case. |
+| S5 | Debuggability | 10% | 2.5 | 4.5 | wgpu errors enumerate adapters and backends; GL's EGL errors were cryptic and the multi-output bug needed manual debugging. |
+| S6 | Text and scaling | 10% | 4 | 4 | Identical pixels and identical atlas/scale code path. |
+|  | **Weighted total** |  | **3.70** | **3.60** |  |
+
+### Decision
+
+**GLES/EGL with glow is the renderer for Hayu.** The weighted difference is
+2.7%, below the 10% tie threshold fixed in this ADR, so the tie-break applies:
+GLES/EGL adds 9 dependencies instead of 53, builds 43% faster from scratch, and
+keeps a working software fallback, while the CPU path remains for tests and
+reference frames.
+
+wgpu is **rejected as the primary backend**, not because it performed badly —
+it used less memory and started faster — but because it lost the tie-break on
+dependency and build cost. Its spike code stays behind the non-default `wgpu`
+feature until M1, then it is deleted unless a concrete need (for example a
+Vulkan-only feature) appears.
+
+Consequences for M1: the bar moves from tiny-skia to the GL backend; the glyph
+atlas, sRGB handling, and buffer-scale rules from this spike become the shared
+render interface; the CPU path stays as a test renderer, not as a fallback for
+users.
+
+### Limitations
+
+- One GPU vendor and one physical output; hotplug was simulated with Hyprland's
+  headless output, and a real monitor unplug was not tested.
+- A live output scale change could not be triggered on this setup
+  (`hyprctl keyword monitor` reported `unknown request` for the headless output),
+  so the scale-change path is implemented and covered by offscreen scale-2
+  frames but not verified on a live surface. Both backends share that code, so
+  the score is unaffected; it is still an M1 task.
+- GPU memory could not be attributed per process: global VRAM moved by more than
+  ±100 MiB from unrelated session processes during sampling. S1 therefore scores
+  PSS and CPU only.
+- Present-mode p50/p95 differ by pacing model, as described above.
+- Build times come from one cold run per feature set on this machine; treat them
+  as order-of-magnitude evidence, not a benchmark suite.

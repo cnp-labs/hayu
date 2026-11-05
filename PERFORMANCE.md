@@ -54,4 +54,5 @@ Compare Noctalia only with equivalent versions, hardware, outputs, workloads, an
 | Commit/profile/hardware | Samples | PSS | Idle CPU | GPU | Startup p95 | Launcher p95 | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 02a7687 / release / AMD Radeon R7 240, Hyprland 0.57.0 | 1 run, 30 s idle | 5.6 MiB | 0.07% of one core | not measured | not measured | not measured | M0 bar only (1366×32, one output, CPU shm path); not a Core, V1 normal, or V1 stress profile |
+| df68feb / release / Radeon R7 240, Hyprland 0.57.0 | 3 offscreen runs × 300 frames | ≈50 MiB GL / ≈32.6 MiB wgpu (spike bar) | <0.03% while holding | not attributable | start 172 ms GL / 141 ms wgpu | not measured | Renderer spike, 1366×32 scene; offscreen p50 0.095 ms GL, 0.125 ms wgpu, 0.538 ms CPU; not a Core/V1 profile |
 | Not measured | — | — | — | — | — | — | No V1 profile has been measured |

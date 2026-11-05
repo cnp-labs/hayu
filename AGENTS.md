@@ -2,8 +2,10 @@
 
 Hayu is a Rust Wayland desktop shell for Hyprland. The repository holds the V1
 planning baseline (Markdown is the specification) plus an **M0 prototype**
-in `src/`: one layer-shell bar, `hayu config check`, and `hayu doctor`. There is
-no V1 feature beyond the bar, no renderer decision, and no packaging or CI.
+in `src/`: one layer-shell bar, `hayu config check`, `hayu doctor`, and a
+renderer spike binary. There is no V1 feature beyond the bar and no packaging or
+CI. The renderer is decided: GLES/EGL with glow, CPU path for tests only
+(ADR-0006); the bar itself still draws through tiny-skia until M1.
 
 ## Verified commands
 
@@ -13,6 +15,8 @@ cargo test                                 # 11 unit tests
 ./target/release/hayu doctor               # works without a shell running
 ./target/release/hayu config check examples/config.toml
 ./target/release/hayu run                  # needs a live Hyprland session
+./target/release/hayu-gpu-spike --backend gl --mode offscreen --frames 300 --json
+cargo build --release --features wgpu      # opt-in backend for the spike only
 ```
 
 `hayu run` maps a real bar over the user's desktop and blocks. Use a timeout for
@@ -26,9 +30,9 @@ only `$XDG_CONFIG_HOME/hayu/config.toml` (no `--config` flag yet).
   PERFORMANCE.md record that no T-01–T-20 result and no V1 profile measurement
   exists.
 - `DECISIONS.md` is the authority on status: **D-01..D-09 user-decided**,
-  **A-01..A-09 proposals**, **O-01..O-08 open**. Never promote a proposal or an
-  open question to a fact. The renderer (O-01) is still undecided; the CPU
-  wl_shm path is a prototype aid, not a choice.
+  **A-01..A-09 proposals**, **O-02..O-08 open**; **O-01 is closed** by ADR-0006.
+  Never promote a proposal or an open question to a fact, and do not reopen the
+  renderer without new measured evidence.
 - Requirements are `HAYU-001..016` (PRD.md), tests `T-01..T-20` (TESTING.md).
   Reference these IDs instead of inventing numbering.
 - "First release" means full V1 at M6, never the M0 bar.
@@ -67,6 +71,13 @@ support in V1.
   directly. Reconnects request a resync before trusting state again.
 - `src/config.rs` is the only schema consumer today. Adding a key there is not
   implementation work; the module that uses it still has to exist.
+- GL backend: every output owns an EGL context, so `make_current` before each
+  draw is mandatory; skipping it crashed the second output with
+  "argument does not name a valid surface" only after a hotplug.
+- The wgpu backend is compiled out unless `--features wgpu`; default builds must
+  keep working with the `gl` feature only.
+- Renderer evidence lives in ADR-0006; do not restate its PSS/latency numbers as
+  V1 profile results.
 
 ## Language and commit workflow (user-mandated)
 
@@ -83,5 +94,6 @@ support in V1.
 ## Where to start reading
 
 `README.md` → `PRD.md` → `SCOPE.md` → `DECISIONS.md` → `ROADMAP.md` for intent;
-`src/main.rs` → `src/bar.rs` → `src/hyprland.rs` for the code; `docs/adr/` for
-the reasoning behind locked choices.
+`src/main.rs` → `src/bar.rs` → `src/hyprland.rs` for the code,
+`src/gpu/` for the renderer spike; `docs/adr/` for the reasoning behind locked
+choices.

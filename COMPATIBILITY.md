@@ -50,6 +50,8 @@ Do not make the entire session depend on a particular systemd user service witho
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-11-05 | 02a7687 | 0.57.0 | Arch Linux, kernel not recorded | AMD Radeon R7 240 (Oland PRO), driver not recorded | 1 × HDMI-A-1, 1366×768, scale 1 | M0 bar only: layer maps, namespaces `hayu`, workspaces/clock/title render; `doctor` and `config check` work; SIGTERM exits 0 | PSS 5.6 MiB; idle CPU 0.07% of one core over 30 s |
 
-This row covers surface creation, text drawing, Hyprland snapshot/event handling, and clean shutdown on a single output. It does not cover input, IME, fractional scaling, multi-monitor, hotplug, tray, audio, notifications, or accessibility; none of those were exercised.
+| 2026-11-05 | df68feb | 0.57.0 | Arch Linux, kernel 7.2.14-zen1 | AMD Radeon R7 200 (RADV OLAND, Mesa 26.2.6), Vulkan 1.3.354 | 1 × HDMI-A-1 1366×768 scale 1, plus a temporary headless output | Renderer spike: GLES/EGL and wgpu present the same scene on a layer surface, survive output add/remove, exit 0 on SIGTERM; GL also runs on llvmpipe; wgpu has no software Vulkan here | Offscreen GL/wgpu frames bit-identical; MAD vs CPU 0.0127% at scale 1, 0.0086% at scale 2; live scale change not exercised |
+
+These rows cover surface creation, text drawing, Hyprland snapshot/event handling, renderer presentation, and clean shutdown on a single output. It does not cover input, IME, fractional scaling, multi-monitor, hotplug, tray, audio, notifications, or accessibility; none of those were exercised.
 
 Releases list tested version ranges, known issues, protocol gaps, and optional dependencies. Other distributions may be tried on a best-effort basis, but must not be labeled supported before testing.
