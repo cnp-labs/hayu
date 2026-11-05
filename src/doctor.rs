@@ -97,6 +97,12 @@ pub fn run() -> i32 {
 
     println!("D-Bus services (audio, UPower, NetworkManager, backlight, tray): not probed in M0");
 
+    println!("IPC protocol: v{}", crate::ipc::PROTOCOL_VERSION);
+    match crate::ipc::socket_path() {
+        Ok(path) => println!("Control socket: {}", path.display()),
+        Err(error) => println!("Control socket: unavailable ({error})"),
+    }
+
     if mandatory_ok { 0 } else { 1 }
 }
 

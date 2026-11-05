@@ -11,20 +11,32 @@ pub struct Theme {
     pub fg: [u8; 3],
     pub muted: [u8; 3],
     pub accent: [u8; 3],
+    pub error: [u8; 3],
 }
 
 impl Theme {
     pub fn from_config(mode: &str, accent: &str) -> Self {
-        let (bg, fg, muted) = if mode == "light" {
-            ([0xF5, 0xF5, 0xF5], [0x1E, 0x1E, 0x2E], [0x6C, 0x6F, 0x85])
+        let (bg, fg, muted, error) = if mode == "light" {
+            (
+                [0xF5, 0xF5, 0xF5],
+                [0x1E, 0x1E, 0x2E],
+                [0x6C, 0x6F, 0x85],
+                [0xA5, 0x1C, 0x30],
+            )
         } else {
-            ([0x1E, 0x1E, 0x2E], [0xCD, 0xD6, 0xF4], [0x6C, 0x70, 0x86])
+            (
+                [0x1E, 0x1E, 0x2E],
+                [0xCD, 0xD6, 0xF4],
+                [0x6C, 0x70, 0x86],
+                [0xFF, 0xB4, 0xAB],
+            )
         };
         Self {
             bg,
             fg,
             muted,
             accent: config::parse_color(accent),
+            error,
         }
     }
 }
@@ -130,7 +142,7 @@ pub fn draw(scene: &Scene<'_>, fonts: &mut FontSystem, cache: &mut SwashCache) -
     Some(pixmap)
 }
 
-fn fill(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3]) {
+pub(crate) fn fill(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3]) {
     let Some(rect) = Rect::from_xywh(x, y, w, h) else {
         return;
     };
@@ -140,7 +152,7 @@ fn fill(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, rgb: [u8; 3]) {
     pixmap.fill_rect(rect, &paint, Transform::identity(), None);
 }
 
-fn text_width(fonts: &mut FontSystem, text: &str, size: f32) -> f32 {
+pub(crate) fn text_width(fonts: &mut FontSystem, text: &str, size: f32) -> f32 {
     let mut buffer = Buffer::new(fonts, Metrics::new(size, size * 1.3));
     buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
     buffer.shape_until_scroll(fonts, false);
@@ -151,7 +163,7 @@ fn text_width(fonts: &mut FontSystem, text: &str, size: f32) -> f32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_text(
+pub(crate) fn draw_text(
     pixmap: &mut Pixmap,
     fonts: &mut FontSystem,
     cache: &mut SwashCache,
@@ -292,6 +304,3 @@ mod tests {
         assert_eq!(format_clock("%H.%M %%", before), "09.59 %");
     }
 }
-
-
-

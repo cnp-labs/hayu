@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use hayu::{bar, config, doctor};
+use hayu::{bar, config, doctor, ipc};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -12,6 +12,16 @@ fn main() -> ExitCode {
         [group, command, path] if group == "config" && command == "check" => {
             check(Some(PathBuf::from(path)))
         }
+        [group, command] if group == "launcher" => match command.as_str() {
+            "toggle" => ipc_command("launcher.toggle"),
+            "open" => ipc_command("launcher.open"),
+            "close" => ipc_command("launcher.close"),
+            _ => {
+                usage();
+                ExitCode::from(2)
+            }
+        },
+        [command] if command == "quit" => ipc_command("quit"),
         [flag] if flag == "-h" || flag == "--help" => {
             usage();
             ExitCode::SUCCESS
@@ -32,6 +42,16 @@ fn check(path: Option<PathBuf>) -> ExitCode {
         }
         Err(err) => {
             eprintln!("hayu: {}: {err}", path.display());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn ipc_command(command: &str) -> ExitCode {
+    match ipc::send_command(command) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("hayu: {error}");
             ExitCode::FAILURE
         }
     }
@@ -70,6 +90,8 @@ fn usage() {
          Usage:\n\
          \x20 hayu run\n\
          \x20 hayu doctor\n\
+         \x20 hayu launcher toggle|open|close\n\
+         \x20 hayu quit\n\
          \x20 hayu config check [PATH]\n"
     );
 }

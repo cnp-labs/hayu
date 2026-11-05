@@ -4,4 +4,6 @@ pub mod desktop;
 pub mod doctor;
 pub mod gpu;
 pub mod hyprland;
+pub mod ipc;
+pub mod launcher;
 pub mod render;

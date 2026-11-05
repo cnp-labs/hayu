@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use calloop::channel::Event as ChannelEvent;
+use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
-use calloop::{EventLoop, LoopSignal};
+use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction};
 use chrono::{Local, Timelike};
 use cosmic_text::{FontSystem, SwashCache};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
@@ -12,6 +14,10 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::{
+        Capability, SeatHandler, SeatState,
+        keyboard::{KeyEvent, KeyboardHandler, Modifiers, RawModifiers},
+    },
     shell::WaylandSurface,
     shell::wlr_layer::{
         Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
@@ -22,11 +28,14 @@ use smithay_client_toolkit::{
 use wayland_client::{
     Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_output, wl_shm, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
 };
 
 use crate::config::Config;
+use crate::desktop;
 use crate::hyprland::{self, Event, Hyprland, Snapshot, Workspace};
+use crate::ipc::{self, Command as IpcCommand};
+use crate::launcher::{self, Launcher};
 use crate::render::{self, Scene, Theme};
 
 pub fn run(cfg: Config) -> Result<(), String> {
@@ -42,6 +51,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
     let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm unavailable: {e}"))?;
     let output_state = OutputState::new(&globals, &qh);
     let registry_state = RegistryState::new(&globals);
+    let seat_state = SeatState::new(&globals, &qh);
 
     let theme = Theme::from_config(&cfg.appearance.mode, &cfg.appearance.accent);
     let mut fonts = FontSystem::new();
@@ -50,6 +60,10 @@ pub fn run(cfg: Config) -> Result<(), String> {
     }
     let clock = render::format_clock(&cfg.clock.format, Local::now().time());
 
+    let mut event_loop: EventLoop<'static, State> =
+        EventLoop::try_new().map_err(|e| format!("cannot create event loop: {e}"))?;
+    let loop_handle = event_loop.handle();
+
     let mut state = State {
         registry_state,
         output_state,
@@ -57,6 +71,9 @@ pub fn run(cfg: Config) -> Result<(), String> {
         layer_shell,
         shm,
         qh: qh.clone(),
+        seat_state,
+        keyboard: None,
+        loop_handle: loop_handle.clone(),
         cfg,
         theme,
         fonts,
@@ -67,7 +84,9 @@ pub fn run(cfg: Config) -> Result<(), String> {
         title: String::new(),
         clock,
         bars: HashMap::new(),
-        loop_signal: None,
+        launcher: Launcher::new(desktop::scan()),
+        ipc_path: None,
+        loop_signal: Some(event_loop.get_signal()),
     };
     if state.hypr.is_none() {
         eprintln!("hayu: Hyprland IPC not found; bar will show the clock only");
@@ -79,10 +98,10 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .roundtrip(&mut state)
         .map_err(|e| format!("Wayland roundtrip failed: {e}"))?;
 
-    let mut event_loop: EventLoop<State> =
-        EventLoop::try_new().map_err(|e| format!("cannot create event loop: {e}"))?;
-    let loop_handle = event_loop.handle();
-    state.loop_signal = Some(event_loop.get_signal());
+    // Bind only once startup work is done, so a CLI client never waits on a half-ready shell.
+    let server = ipc::Server::bind()?;
+    let (listener, ipc_path) = server.into_parts();
+    state.ipc_path = Some(ipc_path);
 
     WaylandSource::new(conn, event_queue)
         .insert(loop_handle.clone())
@@ -119,10 +138,42 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .map_err(|e| format!("cannot insert Hyprland channel: {e}"))?;
     hyprland::spawn_event_thread(tx);
 
-    event_loop
+    let (ipc_tx, ipc_rx) = calloop::channel::channel::<ipc::Job>();
+    loop_handle
+        .insert_source(ipc_rx, |event, _, state| {
+            if let ChannelEvent::Msg(job) = event {
+                state.handle_ipc(job);
+            }
+        })
+        .map_err(|e| format!("cannot insert control channel: {e}"))?;
+
+    let control = Generic::new(listener, Interest::READ, Mode::Level);
+    loop_handle
+        .insert_source(control, move |_, listener, _| {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let tx = ipc_tx.clone();
+                        std::thread::spawn(move || ipc::handle_connection(stream, tx));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => {
+                        eprintln!("hayu: control socket accept failed: {error}");
+                        break;
+                    }
+                }
+            }
+            Ok(PostAction::Continue)
+        })
+        .map_err(|e| format!("cannot insert control socket: {e}"))?;
+
+    let result = event_loop
         .run(None, &mut state, |_| {})
-        .map_err(|e| format!("event loop failed: {e}"))?;
-    Ok(())
+        .map_err(|e| format!("event loop failed: {e}"));
+    if let Some(path) = &state.ipc_path {
+        let _ = std::fs::remove_file(path);
+    }
+    result
 }
 
 fn duration_to_next_minute() -> Duration {
@@ -148,6 +199,9 @@ pub struct State {
     layer_shell: LayerShell,
     shm: Shm,
     qh: QueueHandle<State>,
+    seat_state: SeatState,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    loop_handle: LoopHandle<'static, State>,
     cfg: Config,
     theme: Theme,
     fonts: FontSystem,
@@ -158,6 +212,8 @@ pub struct State {
     title: String,
     clock: String,
     bars: HashMap<u32, Bar>,
+    launcher: Launcher,
+    ipc_path: Option<PathBuf>,
     loop_signal: Option<LoopSignal>,
 }
 
@@ -241,6 +297,138 @@ impl State {
                 eprintln!("hayu: Hyprland event socket disconnected; reconnecting");
             }
         }
+    }
+
+    fn handle_ipc(&mut self, job: ipc::Job) {
+        let ipc::Job {
+            request,
+            mut stream,
+        } = job;
+        let (id, command) = match request {
+            Ok(request) => {
+                let id = request.id;
+                (id, request.command())
+            }
+            Err(error) => (0, Err(error)),
+        };
+        let (response, quit) = match command {
+            Ok(command) => {
+                let result = match command {
+                    IpcCommand::LauncherToggle => self.toggle_launcher(),
+                    IpcCommand::LauncherOpen => self.open_launcher(),
+                    IpcCommand::LauncherClose => {
+                        self.close_launcher();
+                        Ok(())
+                    }
+                    IpcCommand::Quit => Ok(()),
+                };
+                match result {
+                    Ok(()) => (ipc::Response::ok(id), command == IpcCommand::Quit),
+                    Err(error) => (ipc::Response::error(id, error), false),
+                }
+            }
+            Err(error) => (ipc::Response::error(id, error), false),
+        };
+        if let Err(error) = ipc::write_response(&mut stream, &response) {
+            eprintln!("hayu: cannot answer control request: {error}");
+        }
+        if quit && let Some(signal) = &self.loop_signal {
+            signal.stop();
+        }
+    }
+
+    fn toggle_launcher(&mut self) -> Result<(), String> {
+        if self.launcher.is_open() {
+            self.close_launcher();
+            Ok(())
+        } else {
+            self.open_launcher()
+        }
+    }
+
+    fn open_launcher(&mut self) -> Result<(), String> {
+        if !self.cfg.launcher.enabled {
+            return Err("launcher is disabled in config".into());
+        }
+        if self.launcher.is_open() {
+            return Ok(());
+        }
+        let output = self
+            .launcher_output()
+            .ok_or_else(|| "no output is available for the launcher".to_string())?;
+        let scale = self
+            .output_state
+            .info(&output)
+            .map(|info| info.scale_factor)
+            .unwrap_or(1);
+        self.launcher.begin_open();
+        if self.launcher.surface.is_none() {
+            match launcher::Surface::create(
+                &self.compositor,
+                &self.layer_shell,
+                &self.shm,
+                &self.qh,
+                &output,
+                scale,
+            ) {
+                Ok(surface) => self.launcher.show(surface),
+                Err(error) => {
+                    self.launcher.close();
+                    return Err(error);
+                }
+            }
+        }
+        self.draw_launcher();
+        Ok(())
+    }
+
+    fn close_launcher(&mut self) {
+        self.launcher.close();
+    }
+
+    fn launcher_output(&self) -> Option<wl_output::WlOutput> {
+        let focused = self.snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .monitors
+                .iter()
+                .find(|monitor| monitor.focused)
+                .map(|monitor| monitor.name.clone())
+        });
+        if let Some(name) = focused {
+            for bar in self.bars.values() {
+                if self
+                    .output_state
+                    .info(&bar.output)
+                    .and_then(|info| info.name)
+                    .as_deref()
+                    == Some(name.as_str())
+                {
+                    return Some(bar.output.clone());
+                }
+            }
+        }
+        self.bars.values().next().map(|bar| bar.output.clone())
+    }
+
+    fn handle_launcher_key(&mut self, event: KeyEvent) {
+        match self.launcher.key(&event) {
+            launcher::Action::None => {}
+            launcher::Action::Changed => self.draw_launcher(),
+            launcher::Action::Close => self.close_launcher(),
+            launcher::Action::Launch(entry) => match entry.launch() {
+                Ok(()) => self.close_launcher(),
+                Err(error) => {
+                    eprintln!("hayu: {error}");
+                    self.launcher.set_error(error);
+                    self.draw_launcher();
+                }
+            },
+        }
+    }
+
+    fn draw_launcher(&mut self) {
+        self.launcher
+            .draw(&self.theme, &mut self.fonts, &mut self.cache);
     }
 
     fn create_bar(&mut self, output: wl_output::WlOutput) {
@@ -405,6 +593,15 @@ impl CompositorHandler for State {
         surface: &wl_surface::WlSurface,
         factor: i32,
     ) {
+        if self
+            .launcher
+            .surface
+            .as_ref()
+            .is_some_and(|launcher| launcher.layer.wl_surface() == surface)
+            && self.launcher.set_scale(factor)
+        {
+            self.draw_launcher();
+        }
         if let Some(bar) = self
             .bars
             .values_mut()
@@ -472,10 +669,15 @@ impl OutputHandler for State {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
-        if let Some(info) = self.output_state.info(&output)
-            && let Some(bar) = self.bars.get_mut(&output.id().protocol_id())
-        {
-            bar.scale = info.scale_factor.max(1);
+        if let Some(info) = self.output_state.info(&output) {
+            if self.launcher.output_id() == Some(output.id().protocol_id())
+                && self.launcher.set_scale(info.scale_factor)
+            {
+                self.draw_launcher();
+            }
+            if let Some(bar) = self.bars.get_mut(&output.id().protocol_id()) {
+                bar.scale = info.scale_factor.max(1);
+            }
         }
         self.draw_all();
     }
@@ -486,12 +688,19 @@ impl OutputHandler for State {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
-        self.bars.remove(&output.id().protocol_id());
+        let id = output.id().protocol_id();
+        if self.launcher.output_id() == Some(id) {
+            self.launcher.forget_surface();
+        }
+        self.bars.remove(&id);
     }
 }
 
 impl LayerShellHandler for State {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        if self.launcher.on_layer_closed(layer) {
+            return;
+        }
         let key = self
             .bars
             .iter()
@@ -510,6 +719,17 @@ impl LayerShellHandler for State {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        if self
+            .launcher
+            .surface
+            .as_ref()
+            .is_some_and(|launcher| launcher.owns(layer))
+        {
+            self.launcher
+                .resize(configure.new_size.0, configure.new_size.1);
+            self.draw_launcher();
+            return;
+        }
         let fallback = self.cfg.bar.height.clamp(1, 4096) as u32;
         let Some(bar) = self
             .bars
@@ -530,6 +750,120 @@ impl LayerShellHandler for State {
         };
         bar.configured = true;
         self.draw_all();
+    }
+}
+
+impl SeatHandler for State {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Keyboard && self.keyboard.is_none() {
+            match self.seat_state.get_keyboard_with_repeat(
+                qh,
+                &seat,
+                None,
+                self.loop_handle.clone(),
+                Box::new(|state, _, event| state.handle_launcher_key(event)),
+            ) {
+                Ok(keyboard) => self.keyboard = Some(keyboard),
+                Err(error) => eprintln!("hayu: cannot create keyboard: {error}"),
+            }
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Keyboard
+            && let Some(keyboard) = self.keyboard.take()
+        {
+            keyboard.release();
+        }
+    }
+
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {
+    }
+}
+
+impl KeyboardHandler for State {
+    fn enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+        _raw: &[u32],
+        _keysyms: &[smithay_client_toolkit::seat::keyboard::Keysym],
+    ) {
+    }
+
+    fn leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+    ) {
+    }
+
+    fn press_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        self.handle_launcher_key(event);
+    }
+
+    fn repeat_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        self.handle_launcher_key(event);
+    }
+
+    fn release_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _event: KeyEvent,
+    ) {
+    }
+
+    fn update_modifiers(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _modifiers: Modifiers,
+        _raw_modifiers: RawModifiers,
+        _layout: u32,
+    ) {
     }
 }
 

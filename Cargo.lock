@@ -550,6 +550,7 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "wgpu",
+ "xkbcommon",
 ]
 
 [[package]]

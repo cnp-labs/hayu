@@ -27,6 +27,7 @@ libc = "0.2"
 toml = "1"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
+xkbcommon = "0.8"
 
 [[bin]]
 name = "hayu-gpu-spike"
