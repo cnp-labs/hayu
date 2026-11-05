@@ -1,6 +1,6 @@
 # Testing strategy and release gate
 
-Status: plan with a partial M0 suite. `cargo test` runs 38 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, scale 2 and two outputs were exercised live (see below); IME, screen-reader, soak, fractional scale and mixed per-output scales have not been run.
+Status: plan with a partial M0 suite. `cargo test` runs 39 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, scale 2 and two outputs were exercised live (see below); IME, screen-reader, soak, fractional scale and mixed per-output scales have not been run.
 
 ## Testing layers
 
@@ -88,6 +88,32 @@ Hyprland uses the Lua config provider, where `hyprctl keyword` answers
   used.
 - After the run, `HDMI-A-1` was returned to scale 1 and the full suite passed
   again.
+
+### Terminal fallback arguments (November 5, 2026)
+
+The fallback list is not one invocation: each emulator has its own way to run a
+program. Verified at the current commit by pointing the shell's `PATH` at a
+directory holding one recording stub named after each emulator, launching the
+`Terminal=true` test entry through the real launcher, and reading the recorded
+argv. This exercises selection and spawn; it does not prove that a real binary
+of that emulator accepts the form.
+
+| Emulator | Invocation | Evidence |
+| --- | --- | --- |
+| foot | `foot <program> <args>` (`-e` is documented as ignored) | Live with the real foot binary; stub argv matches |
+| alacritty | `alacritty -e <program> <args>` | Stub argv live; `-e, --command` from `alacritty(1)` |
+| kitty | `kitty -- <program> <args>` | Stub argv live; `--` terminator in kitty's CLI parser |
+| wezterm | `wezterm start -- <program> <args>` | Stub argv live; `start` from `wezterm start --help` |
+| ghostty | `ghostty -e <program> <args>` | Stub argv live; `-e` special case in `src/cli/ghostty.zig` |
+| konsole | `konsole -e <program> <args>` | Stub argv live; `-e` in the Konsole manual |
+| xterm | `xterm -e <program> <args>` | Stub argv live; `-e program [arguments]` in `xterm(1)` |
+| `$TERMINAL` | `<value> -e <program> <args>` | Stub argv live; the emulator is unknown, so `-e` is the widest convention |
+
+- Only foot is installed on this machine. The other six forms were checked
+  against their upstream documentation plus the recorded spawn: no real window
+  was opened for them, and a future upstream change could invalidate a form.
+- The unit test `each_fallback_uses_its_own_program_arguments` pins the same
+  table without spawning.
 
 ## Acceptance matrix
 
