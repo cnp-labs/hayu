@@ -78,6 +78,19 @@ impl Entry {
 }
 
 pub fn scan() -> Vec<Entry> {
+    let started = std::time::Instant::now();
+    let entries = scan_uncached();
+    if std::env::var_os("HAYU_DEBUG_SCAN").is_some() {
+        eprintln!(
+            "hayu: desktop scan: {} entries in {:.2} ms",
+            entries.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    entries
+}
+
+fn scan_uncached() -> Vec<Entry> {
     let dirs: Vec<PathBuf> = data_dirs()
         .iter()
         .map(|dir| dir.join("applications"))

@@ -115,6 +115,23 @@ impl Launcher {
         }
     }
 
+    /// Replace the catalogue, e.g. after rescanning when the launcher opens.
+    pub fn set_entries(&mut self, entries: Vec<Entry>) {
+        self.entries = entries;
+        self.recompute();
+    }
+
+    /// State for `HAYU_DEBUG_KEYS=1`: lets a live input test observe what the
+    /// key produced without a screenshot tool. Never logged unless asked.
+    pub fn debug_state(&self) -> (&str, usize, usize) {
+        (&self.query, self.selected, self.results.len())
+    }
+
+    /// Names of the first three results, for `HAYU_DEBUG_KEYS` only.
+    pub fn debug_results(&self) -> Vec<&str> {
+        self.results.iter().take(3).map(|entry| entry.name.as_str()).collect()
+    }
+
     pub fn is_open(&self) -> bool {
         self.open
     }

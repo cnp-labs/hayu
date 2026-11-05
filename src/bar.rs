@@ -84,7 +84,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
         title: String::new(),
         clock,
         bars: HashMap::new(),
-        launcher: Launcher::new(desktop::scan()),
+        launcher: Launcher::new(Vec::new()),
         ipc_path: None,
         loop_signal: Some(event_loop.get_signal()),
     };
@@ -361,6 +361,9 @@ impl State {
             .info(&output)
             .map(|info| info.scale_factor)
             .unwrap_or(1);
+        // Refresh on every open so an application installed since startup can
+        // be launched without restarting the shell.
+        self.launcher.set_entries(desktop::scan());
         self.launcher.begin_open();
         if self.launcher.surface.is_none() {
             match launcher::Surface::create(
@@ -412,7 +415,24 @@ impl State {
     }
 
     fn handle_launcher_key(&mut self, event: KeyEvent) {
-        match self.launcher.key(&event) {
+        if std::env::var_os("HAYU_DEBUG_KEYS").is_some() {
+            let (query, selected, results) = self.launcher.debug_state();
+            eprintln!(
+                "hayu: key keysym=0x{:x} utf8={:?} open={} before query={query:?} sel={selected} results={results}",
+                event.keysym.raw(),
+                event.utf8,
+                self.launcher.is_open(),
+            );
+        }
+        let action = self.launcher.key(&event);
+        if std::env::var_os("HAYU_DEBUG_KEYS").is_some() {
+            let (query, selected, results) = self.launcher.debug_state();
+            eprintln!(
+                "hayu: key -> {action:?} query={query:?} sel={selected} results={results} top={:?}",
+                self.launcher.debug_results()
+            );
+        }
+        match action {
             launcher::Action::None => {}
             launcher::Action::Changed => self.draw_launcher(),
             launcher::Action::Close => self.close_launcher(),
@@ -428,8 +448,15 @@ impl State {
     }
 
     fn draw_launcher(&mut self) {
+        let started = std::time::Instant::now();
         self.launcher
             .draw(&self.theme, &mut self.fonts, &mut self.cache);
+        if std::env::var_os("HAYU_DEBUG_KEYS").is_some() {
+            eprintln!(
+                "hayu: launcher frame {:.2} ms",
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
     }
 
     fn create_bar(&mut self, output: wl_output::WlOutput) {
