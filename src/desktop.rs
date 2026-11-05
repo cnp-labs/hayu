@@ -45,12 +45,16 @@ fn pick_terminal(env_terminal: Option<&str>, path: &[PathBuf]) -> Option<Termina
         && let Some(name) = value.split_whitespace().next()
         && let Some(program) = find(name)
     {
-        // An unknown emulator gets the widest convention; the user can point
-        // $TERMINAL at one that accepts -e.
-        return Some(Terminal {
-            program,
-            prefix: &["-e"],
-        });
+        // Match the resolved file name so `$TERMINAL=/usr/bin/kitty` and
+        // `$TERMINAL=kitty` agree. An unknown emulator gets the widest
+        // convention; the user can point $TERMINAL at one that accepts -e.
+        let prefix = program
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| TERMINAL_CANDIDATES.iter().find(|(known, _)| *known == name))
+            .map(|(_, prefix)| *prefix)
+            .unwrap_or(&["-e"]);
+        return Some(Terminal { program, prefix });
     }
     TERMINAL_CANDIDATES
         .iter()
@@ -849,25 +853,57 @@ mod tests {
             std::fs::create_dir_all(&bin).unwrap();
             let exe = bin.join(name);
             install(&exe);
-            let found = pick_terminal(None, &[bin]).unwrap();
+            let found = pick_terminal(None, &[bin.clone()]).unwrap();
             assert_eq!(found.program, exe, "{name}");
             assert_eq!(found.prefix, prefix, "{name}");
+
+            let by_name = pick_terminal(Some(name), &[bin.clone()]).unwrap();
+            assert_eq!(by_name.program, exe, "{name} in $TERMINAL by name");
+            assert_eq!(by_name.prefix, prefix, "{name} in $TERMINAL by name");
+
+            let absolute = exe.to_str().unwrap();
+            let by_path = pick_terminal(Some(absolute), &[dir.join("empty")]).unwrap();
+            assert_eq!(by_path.program, exe, "{name} in $TERMINAL by path");
+            assert_eq!(by_path.prefix, prefix, "{name} in $TERMINAL by path");
 
             let mut entry = entry("x.desktop", "X");
             entry.exec = vec!["btop".into(), "--utf".into()];
             entry.terminal = true;
             let mut expected: Vec<&str> = prefix.to_vec();
             expected.extend(["btop", "--utf"]);
-            let command = entry
-                .command(Some(Terminal {
-                    program: exe.clone(),
-                    prefix,
-                }))
-                .unwrap();
+            let command = entry.command(Some(found)).unwrap();
             assert_eq!(command.get_program(), exe, "{name}");
             assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{name}");
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn argument_vector_survives_spaces_empty_and_shell_characters() {
+        let dir = temp_dir("argv");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("kitty");
+        install(&exe);
+        let found = pick_terminal(Some("kitty"), &[bin]).unwrap();
+
+        let argv = [
+            "echo",
+            "",
+            "two words",
+            "$HOME",
+            "a;b|c&d",
+            "quote's \"double\"",
+        ];
+        let mut entry = entry("x.desktop", "X");
+        entry.exec = argv.iter().map(|arg| (*arg).to_string()).collect();
+        entry.terminal = true;
+        let command = entry.command(Some(found)).unwrap();
+        let mut expected = vec!["--"];
+        expected.extend(argv);
+        assert_eq!(command.get_program(), exe);
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
