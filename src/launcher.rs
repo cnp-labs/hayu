@@ -21,6 +21,10 @@ pub const WIDTH: u32 = 560;
 pub const HEIGHT: u32 = 420;
 const MARGIN_TOP: i32 = 80;
 const VISIBLE_ROWS: usize = 8;
+/// Logical surface metrics shared with the text-input cursor rectangle.
+pub const PAD: f32 = 20.0;
+pub const INPUT_SIZE: f32 = 18.0;
+pub const INPUT_Y: f32 = 17.0;
 
 pub struct Surface {
     pub layer: LayerSurface,
@@ -95,6 +99,7 @@ pub struct Launcher {
     entries: Vec<Entry>,
     results: Vec<Entry>,
     query: String,
+    preedit: String,
     selected: usize,
     error: Option<String>,
     open: bool,
@@ -108,6 +113,7 @@ impl Launcher {
             entries,
             results,
             query: String::new(),
+            preedit: String::new(),
             selected: 0,
             error: None,
             open: false,
@@ -129,15 +135,49 @@ impl Launcher {
 
     /// Names of the first three results, for `HAYU_DEBUG_KEYS` only.
     pub fn debug_results(&self) -> Vec<&str> {
-        self.results.iter().take(3).map(|entry| entry.name.as_str()).collect()
+        self.results
+            .iter()
+            .take(3)
+            .map(|entry| entry.name.as_str())
+            .collect()
     }
 
     pub fn is_open(&self) -> bool {
         self.open
     }
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+    pub fn preedit(&self) -> &str {
+        &self.preedit
+    }
+    /// Append text committed by the input method at the end of the query.
+    pub fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.query.push_str(text);
+        self.recompute();
+    }
+    /// Remove `bytes` bytes just before the caret, stopping on a char boundary.
+    pub fn delete_before(&mut self, bytes: u32) {
+        if bytes == 0 {
+            return;
+        }
+        let mut cut = self.query.len().saturating_sub(bytes as usize);
+        while cut > 0 && !self.query.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        self.query.truncate(cut);
+        self.recompute();
+    }
+    pub fn set_preedit(&mut self, text: String) {
+        self.preedit = text;
+    }
 
     pub fn begin_open(&mut self) {
         self.query.clear();
+        self.preedit.clear();
         self.selected = 0;
         self.error = None;
         self.recompute();
@@ -162,6 +202,7 @@ impl Launcher {
     }
 
     pub fn close(&mut self) {
+        self.preedit.clear();
         if let Some(surface) = &mut self.surface {
             surface.hide();
         }
@@ -276,6 +317,7 @@ impl Launcher {
         let Some(pixmap) = draw_frame(
             theme,
             &self.query,
+            &self.preedit,
             &self.results,
             self.selected,
             self.error.as_deref(),
@@ -318,6 +360,7 @@ impl Launcher {
 pub fn draw_frame(
     theme: &Theme,
     query: &str,
+    preedit: &str,
     results: &[Entry],
     selected: usize,
     error: Option<&str>,
@@ -346,9 +389,9 @@ pub fn draw_frame(
         return Some(pixmap);
     }
 
-    let pad = 20.0 * scale;
-    let input_size = 18.0 * scale;
-    let input_y = 17.0 * scale;
+    let pad = PAD * scale;
+    let input_size = INPUT_SIZE * scale;
+    let input_y = INPUT_Y * scale;
     let divider_y = 56.0 * scale;
     render::fill(
         &mut pixmap,
@@ -359,10 +402,17 @@ pub fn draw_frame(
         theme.muted,
     );
 
-    let measure_input = |text: &str| render::text_width(fonts, text, input_size);
-    let shown_query = render::ellipsize(query, pixel_width as f32 - pad * 3.0, measure_input);
+    let shown_query = render::ellipsize(query, pixel_width as f32 - pad * 3.0, |text| {
+        render::text_width(fonts, text, input_size)
+    });
+    let query_width = render::text_width(fonts, &shown_query, input_size);
+    let shown_preedit = render::ellipsize(
+        preedit,
+        (pixel_width as f32 - pad - (pad + query_width)).max(0.0),
+        |text| render::text_width(fonts, text, input_size),
+    );
     let query_x = pad;
-    if query.is_empty() {
+    if query.is_empty() && preedit.is_empty() {
         render::draw_text(
             &mut pixmap,
             fonts,
@@ -385,7 +435,20 @@ pub fn draw_frame(
             theme.fg,
         );
     }
-    let cursor_x = query_x + render::text_width(fonts, &shown_query, input_size) + 1.0 * scale;
+    let query_end = query_x + query_width;
+    if !shown_preedit.is_empty() {
+        render::draw_text(
+            &mut pixmap,
+            fonts,
+            cache,
+            &shown_preedit,
+            query_end,
+            input_y,
+            input_size,
+            theme.accent,
+        );
+    }
+    let cursor_x = query_end + render::text_width(fonts, &shown_preedit, input_size) + 1.0 * scale;
     render::fill(
         &mut pixmap,
         cursor_x,
@@ -518,7 +581,7 @@ mod tests {
         let mut fonts = FontSystem::new();
         let mut cache = SwashCache::new();
         let pixmap = draw_frame(
-            &theme, "fi", &results, 0, None, WIDTH, HEIGHT, 2, &mut fonts, &mut cache,
+            &theme, "fi", "", &results, 0, None, WIDTH, HEIGHT, 2, &mut fonts, &mut cache,
         )
         .expect("launcher frame");
         assert_eq!(pixmap.width(), WIDTH * 2);
@@ -542,6 +605,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ime_edits_query_on_char_boundaries() {
+        let mut launcher = Launcher::new(vec![entry("a.desktop", "Alpha")]);
+        launcher.begin_open();
+        launcher.insert_text("日本");
+        launcher.set_preedit("にほ".into());
+        assert_eq!(launcher.query(), "日本");
+        assert_eq!(launcher.preedit(), "にほ");
+        launcher.delete_before(3);
+        assert_eq!(launcher.query(), "日", "delete stops on a char boundary");
+        launcher.delete_before(100);
+        assert_eq!(launcher.query(), "");
+        launcher.close();
+        assert_eq!(launcher.preedit(), "", "close drops the preedit");
+        launcher.begin_open();
+        assert_eq!(launcher.query(), "");
+        assert_eq!(launcher.preedit(), "", "reopen starts clean");
+    }
     #[test]
     fn key_actions_are_deterministic() {
         use smithay_client_toolkit::seat::keyboard::KeyEvent;

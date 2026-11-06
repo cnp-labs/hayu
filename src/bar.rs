@@ -26,9 +26,13 @@ use smithay_client_toolkit::{
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use wayland_client::{
-    Connection, Proxy, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
+};
+use wayland_protocols::wp::text_input::zv3::client::{
+    zwp_text_input_manager_v3::ZwpTextInputManagerV3,
+    zwp_text_input_v3::{self, ZwpTextInputV3},
 };
 
 use crate::config::{self, Config};
@@ -52,6 +56,10 @@ pub fn run(cfg: Config) -> Result<(), String> {
     let output_state = OutputState::new(&globals, &qh);
     let registry_state = RegistryState::new(&globals);
     let seat_state = SeatState::new(&globals, &qh);
+    let ime_manager = globals.bind(&qh, 1..=1, ()).ok();
+    if ime_manager.is_none() {
+        eprintln!("hayu: text-input-v3 is not offered; IME support is off");
+    }
 
     let theme = Theme::from_config(&cfg.appearance.mode, &cfg.appearance.accent);
     let mut fonts = FontSystem::new();
@@ -73,6 +81,8 @@ pub fn run(cfg: Config) -> Result<(), String> {
         qh: qh.clone(),
         seat_state,
         keyboard: None,
+        ime_manager,
+        ime: None,
         loop_handle: loop_handle.clone(),
         cfg,
         theme,
@@ -193,6 +203,13 @@ struct Bar {
     configured: bool,
 }
 
+struct Ime {
+    object: ZwpTextInputV3,
+    enabled: bool,
+    pending_preedit: Option<String>,
+    pending_commit: Option<String>,
+    pending_delete: u32,
+}
 pub struct State {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -202,6 +219,8 @@ pub struct State {
     qh: QueueHandle<State>,
     seat_state: SeatState,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    ime_manager: Option<ZwpTextInputManagerV3>,
+    ime: Option<Ime>,
     loop_handle: LoopHandle<'static, State>,
     cfg: Config,
     theme: Theme,
@@ -360,8 +379,7 @@ impl State {
         self.sync_bars();
         self.apply_bar_geometry();
         self.draw_all();
-        Ok((!restart.is_empty())
-            .then(|| format!("restart required for: {}", restart.join(", "))))
+        Ok((!restart.is_empty()).then(|| format!("restart required for: {}", restart.join(", "))))
     }
 
     /// Height and edge are layer-shell state, so a change needs a new configure
@@ -435,7 +453,133 @@ impl State {
     }
 
     fn close_launcher(&mut self) {
+        self.ime_disable();
         self.launcher.close();
+    }
+    fn ime_attach_seat(&mut self, qh: &QueueHandle<Self>, seat: &wl_seat::WlSeat) {
+        if self.ime.is_some() {
+            return;
+        }
+        let Some(manager) = &self.ime_manager else {
+            return;
+        };
+        let object = manager.get_text_input(seat, qh, ());
+        self.ime = Some(Ime {
+            object,
+            enabled: false,
+            pending_preedit: None,
+            pending_commit: None,
+            pending_delete: 0,
+        });
+    }
+    fn ime_is_launcher(&self, surface: &wl_surface::WlSurface) -> bool {
+        self.launcher
+            .surface
+            .as_ref()
+            .is_some_and(|launcher| launcher.layer.wl_surface() == surface)
+    }
+    fn ime_enable(&mut self) {
+        if self.ime.as_ref().is_none_or(|ime| ime.enabled) {
+            return;
+        }
+        if let Some(ime) = self.ime.as_mut() {
+            ime.object.enable();
+            ime.enabled = true;
+        }
+        if std::env::var_os("HAYU_DEBUG_IME").is_some() {
+            eprintln!("hayu: ime enabled");
+        }
+        self.ime_sync(zwp_text_input_v3::ChangeCause::Other);
+    }
+    fn ime_disable(&mut self) {
+        let Some(ime) = self.ime.as_mut() else {
+            return;
+        };
+        if !ime.enabled {
+            return;
+        }
+        ime.object.disable();
+        ime.object.commit();
+        ime.enabled = false;
+        ime.pending_preedit = None;
+        ime.pending_commit = None;
+        ime.pending_delete = 0;
+        if std::env::var_os("HAYU_DEBUG_IME").is_some() {
+            eprintln!("hayu: ime disabled");
+        }
+        self.launcher.set_preedit(String::new());
+    }
+    fn ime_cursor_rect(&mut self, query: &str) -> (i32, i32, i32, i32) {
+        let scale = self
+            .launcher
+            .surface
+            .as_ref()
+            .map_or(1, |surface| surface.scale) as f32;
+        let x = (launcher::PAD + render::text_width(&mut self.fonts, query, launcher::INPUT_SIZE))
+            / scale;
+        (
+            x as i32,
+            (launcher::INPUT_Y / scale) as i32,
+            2,
+            (launcher::INPUT_SIZE / scale) as i32,
+        )
+    }
+    /// Re-send the field state the protocol expects after the query changed.
+    fn ime_sync(&mut self, cause: zwp_text_input_v3::ChangeCause) {
+        if !self.ime.as_ref().is_some_and(|ime| ime.enabled) {
+            return;
+        }
+        let query = self.launcher.query().to_string();
+        let cursor = query.len() as i32;
+        let (x, y, width, height) = self.ime_cursor_rect(&query);
+        let Some(ime) = self.ime.as_mut() else {
+            return;
+        };
+        ime.object.set_surrounding_text(query, cursor, cursor);
+        ime.object.set_text_change_cause(cause);
+        ime.object.set_content_type(
+            zwp_text_input_v3::ContentHint::None,
+            zwp_text_input_v3::ContentPurpose::Normal,
+        );
+        ime.object.set_cursor_rectangle(x, y, width, height);
+        ime.object.commit();
+    }
+    fn ime_enter(&mut self, surface: &wl_surface::WlSurface) {
+        if self.launcher.is_open() && self.ime_is_launcher(surface) {
+            self.ime_enable();
+        }
+    }
+    fn ime_leave(&mut self, surface: &wl_surface::WlSurface) {
+        if self.ime_is_launcher(surface) {
+            self.ime_disable();
+        }
+    }
+    /// Apply the pending input-method state in the order the protocol requires.
+    fn ime_done(&mut self) {
+        let Some(ime) = self.ime.as_mut() else {
+            return;
+        };
+        let preedit = ime.pending_preedit.take();
+        let commit = ime.pending_commit.take();
+        let delete = std::mem::take(&mut ime.pending_delete);
+        if delete > 0 {
+            self.launcher.delete_before(delete);
+        }
+        if let Some(text) = commit {
+            self.launcher.insert_text(&text);
+        }
+        if let Some(text) = preedit {
+            self.launcher.set_preedit(text);
+        }
+        if std::env::var_os("HAYU_DEBUG_IME").is_some() {
+            eprintln!(
+                "hayu: ime done delete={delete} query_len={} preedit_len={}",
+                self.launcher.query().len(),
+                self.launcher.preedit().len()
+            );
+        }
+        self.draw_launcher();
+        self.ime_sync(zwp_text_input_v3::ChangeCause::InputMethod);
     }
 
     /// Whether the config asks for a bar on this output name. `*` matches all.
@@ -536,7 +680,10 @@ impl State {
         }
         match action {
             launcher::Action::None => {}
-            launcher::Action::Changed => self.draw_launcher(),
+            launcher::Action::Changed => {
+                self.ime_sync(zwp_text_input_v3::ChangeCause::Other);
+                self.draw_launcher();
+            }
             launcher::Action::Close => self.close_launcher(),
             launcher::Action::Launch(entry) => match entry.launch() {
                 Ok(()) => self.close_launcher(),
@@ -828,6 +975,7 @@ impl OutputHandler for State {
     ) {
         let id = output.id().protocol_id();
         if self.launcher.output_id() == Some(id) {
+            self.ime_disable();
             self.launcher.forget_surface();
         }
         self.bars.remove(&id);
@@ -837,6 +985,7 @@ impl OutputHandler for State {
 impl LayerShellHandler for State {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
         if self.launcher.on_layer_closed(layer) {
+            self.ime_disable();
             return;
         }
         let key = self
@@ -898,7 +1047,9 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
+    fn new_seat(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.ime_attach_seat(qh, &seat);
+    }
 
     fn new_capability(
         &mut self,
@@ -907,6 +1058,11 @@ impl SeatHandler for State {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
+        if capability == Capability::Keyboard {
+            // The initial seat is bound before the handler exists, so
+            // `new_seat` never runs for it; capability is the reliable hook.
+            self.ime_attach_seat(qh, &seat);
+        }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             match self.seat_state.get_keyboard_with_repeat(
                 qh,
@@ -1007,6 +1163,49 @@ impl KeyboardHandler for State {
     }
 }
 
+impl Dispatch<ZwpTextInputManagerV3, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZwpTextInputManagerV3,
+        _: <ZwpTextInputManagerV3 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ZwpTextInputV3, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ZwpTextInputV3,
+        event: zwp_text_input_v3::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_text_input_v3::Event::Enter { surface } => state.ime_enter(&surface),
+            zwp_text_input_v3::Event::Leave { surface } => state.ime_leave(&surface),
+            zwp_text_input_v3::Event::PreeditString { text, .. } => {
+                if let Some(ime) = state.ime.as_mut() {
+                    ime.pending_preedit = text;
+                }
+            }
+            zwp_text_input_v3::Event::CommitString { text } => {
+                if let Some(ime) = state.ime.as_mut() {
+                    ime.pending_commit = text;
+                }
+            }
+            zwp_text_input_v3::Event::DeleteSurroundingText { before_length, .. } => {
+                if let Some(ime) = state.ime.as_mut() {
+                    ime.pending_delete = before_length;
+                }
+            }
+            zwp_text_input_v3::Event::Done { .. } => state.ime_done(),
+            _ => {}
+        }
+    }
+}
 impl ShmHandler for State {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
