@@ -15,6 +15,7 @@ Baseline date: November 2, 2026. This document distinguishes user decisions from
 | D-07 | Internal locker deferred; users use Hyprlock | SCOPE |
 | D-08 | Motto “Lightweight desktop shell.” | README |
 | D-09 | English for all Markdown files and documentation | User's subsequent language request |
+| D-10 | Text input through `zwp_text_input_v3`, with the keysym path kept as the permanent fallback | ADR-0007; HAYU-003, HAYU-015 |
 
 ## Baseline proposals not explicitly selected
 

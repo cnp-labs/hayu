@@ -52,7 +52,7 @@ exits non-zero and leaves the running state untouched.
   Reference these IDs instead of inventing numbering.
 - "First release" means full V1 at M6, never the M0 bar.
 - Foundational changes (UI foundation, config format, renderer, privacy/state
-  model) require a new ADR in `docs/adr/`; next number is **0006**. Feature
+  model) require a new ADR in `docs/adr/`; next number is **0008**. Feature
   changes need a PRD ID plus matching SCOPE, TESTING, and budget updates.
 - Noctalia creates no feature-parity obligation; do not copy its code, assets,
   or palette.
