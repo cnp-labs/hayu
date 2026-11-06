@@ -84,6 +84,11 @@ support in V1.
   and the exact minute tick; do not add a frame loop or per-widget polling.
 - The Hyprland adapter owns both sockets; widgets must not talk to them
   directly. Reconnects request a resync before trusting state again.
+- Hyprland sends text-input `enter` only when an input method is registered
+  with it (its `InputMethodRelay` returns early when no IME is bound), so a
+  `zwp_text_input_v3` client sees no `enter` on an IME-less session. Do not
+  treat that as a client bug, and do not "fix" it by enabling text input
+  without an `enter`.
 - The control socket is not the Hyprland socket: `src/ipc.rs` owns
   `$XDG_RUNTIME_DIR/hayu/<session>/control.sock` (0700 dir, 0600 socket,
   protocol v1, 4 KiB request cap, 1 s timeout). It runs as a calloop source,
