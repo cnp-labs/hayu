@@ -31,7 +31,7 @@ use wayland_client::{
     protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
 };
 
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::desktop;
 use crate::hyprland::{self, Event, Hyprland, Snapshot, Workspace};
 use crate::ipc::{self, Command as IpcCommand};
@@ -188,6 +188,7 @@ struct Bar {
     pool: SlotPool,
     width: u32,
     height: u32,
+    bottom: bool,
     scale: i32,
     configured: bool,
 }
@@ -321,6 +322,7 @@ impl State {
                         Ok(())
                     }
                     IpcCommand::Quit => Ok(()),
+                    IpcCommand::Reload => self.reload_config(),
                 };
                 match result {
                     Ok(()) => (ipc::Response::ok(id), command == IpcCommand::Quit),
@@ -334,6 +336,48 @@ impl State {
         }
         if quit && let Some(signal) = &self.loop_signal {
             signal.stop();
+        }
+    }
+
+    /// Re-read the config file. A parse or validation error keeps the running
+    /// state untouched, so a bad edit cannot take the shell down.
+    fn reload_config(&mut self) -> Result<(), String> {
+        let path = config::default_path();
+        let cfg = if path.exists() {
+            config::load(&path).map_err(|error| format!("{}: {error}", path.display()))?
+        } else {
+            config::Config::default()
+        };
+        let theme = Theme::from_config(&cfg.appearance.mode, &cfg.appearance.accent);
+        self.cfg = cfg;
+        self.theme = theme;
+        self.clock = render::format_clock(&self.cfg.clock.format, Local::now().time());
+        if !self.cfg.launcher.enabled && self.launcher.is_open() {
+            self.close_launcher();
+        }
+        self.apply_bar_geometry();
+        self.draw_all();
+        Ok(())
+    }
+
+    /// Height and edge are layer-shell state, so a change needs a new configure
+    /// before the next buffer. Outputs and widget lists still need a restart.
+    fn apply_bar_geometry(&mut self) {
+        let height = self.cfg.bar.height.clamp(1, 4096) as u32;
+        let bottom = self.cfg.bar.position == "bottom";
+        for bar in self.bars.values_mut() {
+            if bar.height == height && bar.bottom == bottom {
+                continue;
+            }
+            let mut anchor = Anchor::LEFT | Anchor::RIGHT;
+            anchor |= if bottom { Anchor::BOTTOM } else { Anchor::TOP };
+            bar.layer.set_anchor(anchor);
+            bar.layer.set_size(0, height);
+            bar.layer.set_exclusive_zone(height as i32);
+            bar.height = height;
+            bar.bottom = bottom;
+            bar.configured = false;
+            bar.layer.commit();
         }
     }
 
@@ -501,6 +545,7 @@ impl State {
                 pool,
                 width: scale as u32 * 256,
                 height,
+                bottom: self.cfg.bar.position == "bottom",
                 scale,
                 configured: false,
             },

@@ -19,6 +19,7 @@ pub enum Command {
     LauncherOpen,
     LauncherClose,
     Quit,
+    Reload,
 }
 
 impl Command {
@@ -28,6 +29,7 @@ impl Command {
             "launcher.open" => Ok(Self::LauncherOpen),
             "launcher.close" => Ok(Self::LauncherClose),
             "quit" => Ok(Self::Quit),
+            "reload" => Ok(Self::Reload),
             other => Err(format!("unknown command: {other}")),
         }
     }
@@ -393,6 +395,7 @@ mod tests {
             "{\"id\":7,\"cmd\":\"launcher.toggle\"}"
         );
         assert_eq!(Command::parse("quit").unwrap(), Command::Quit);
+        assert_eq!(Command::parse("reload").unwrap(), Command::Reload);
         assert!(Command::parse("shell.exec").is_err());
     }
 

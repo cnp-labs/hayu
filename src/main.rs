@@ -22,6 +22,7 @@ fn main() -> ExitCode {
             }
         },
         [command] if command == "quit" => ipc_command("quit"),
+        [command] if command == "reload" => ipc_command("reload"),
         [flag] if flag == "-h" || flag == "--help" => {
             usage();
             ExitCode::SUCCESS
@@ -92,6 +93,7 @@ fn usage() {
          \x20 hayu doctor\n\
          \x20 hayu launcher toggle|open|close\n\
          \x20 hayu quit\n\
+         \x20 hayu reload\n\
          \x20 hayu config check [PATH]\n"
     );
 }
