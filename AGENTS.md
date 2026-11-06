@@ -6,7 +6,7 @@ in `src/`: one layer-shell bar, a keyboard launcher reachable over a local
 control socket, `hayu config check`, `hayu doctor`, and a renderer spike binary.
 There is no V1 feature beyond the bar and launcher, and no packaging or CI. The
 renderer is decided: GLES/EGL with glow, CPU path for tests only (ADR-0006);
-both surfaces still draw through tiny-skia until M1.
+both surfaces draw through it.
 
 ## Verified commands
 

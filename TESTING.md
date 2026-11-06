@@ -258,6 +258,44 @@ gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
   or scroll position. One output at scale 1 was used, and `IsEnabled` was set
   by the check rather than by a client.
 
+### GLES/EGL render path (November 6, 2026)
+Run at `f105f22` on the same session (Hyprland 0.57.0, one 1366×768 output at
+scale 1, RADV OLAND). The bar and the launcher now build a `render::Frame` and
+present it through one EGL context and window surface per layer surface; the
+tiny-skia path survives only as `render::rasterize`, which the unit tests call.
+There is no shm buffer and no `wl_shm` bind on the shell path any more.
+
+```
+cargo test                                   # 46 tests
+tools/live/input-suite.sh                    # 15 checks
+tools/live/reload-suite.sh                   # 41 checks
+/usr/bin/python3 tools/live/a11y-suite.py    # exits 0
+```
+
+| Check | Result |
+| --- | --- |
+| Bar presents through EGL | Pass: the bar surface is created, then painted by `swap_buffers`; startup, workspace/title events and the minute tick all reached it |
+| Launcher presents through EGL | Pass: all 15 input checks pass, including type, repeat, arrows, Enter, Escape, `Terminal=true` and the failing-Exec error row |
+| Reload keeps the renderer consistent | Pass: all 41 checks, including 32px top bar → 40px bottom bar at y=728, `launcher.enabled=false`, and `bar.outputs` reconciliation |
+| Accessibility is unaffected | Pass: the AT-SPI suite exits 0 with the same names, roles, query value, selection and hidden root as before |
+| Glyph reuse | Pass: `frame_reuses_glyphs_from_the_atlas` shows a second identical frame adds no atlas change |
+| Reference pixels | Pass: the launcher test rasterizes the same frame at scale 2 and finds the accent colour |
+| Protocol health | Pass: no protocol error in either live log; no `hayu run` left behind |
+
+- Limits: there is no screenshot or screencopy tool on this machine, so the GL
+  output was never compared pixel for pixel with the CPU reference, and nothing
+  was read back from the EGL surface. Correctness rests on the shared frame
+  data, the rasterizer test, and the live suites proving the elements react and
+  the surfaces stay up. One output at integral scale was used; fractional and
+  mixed scales remain untested.
+- The idle redraw evidence above counted `wl_surface.commit` while the shell
+  still used `wl_shm`. Each frame is now one commit from `swap_buffers`, so the
+  same counting method applies, but the idle runs were not repeated after this
+  change.
+- `cargo test` covers the frame/atlas code with the system font database; on a
+  machine without fonts the text assertions are skipped the same way the old
+  render tests were.
+
 ### Terminal fallback arguments (November 5, 2026)
 
 The fallback list is not one invocation: each emulator has its own way to run a

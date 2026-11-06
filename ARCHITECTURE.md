@@ -1,6 +1,6 @@
 # Hayu architecture
 
-Status: initial design 0.2. The user decided on internal UI/Rust/Hyprland/TOML; the module organization and process model below remain proposals. `src/` implements only an M0 slice: Wayland surfaces, the Hyprland adapter, the CPU render path, the bar, config validation, and `doctor`.
+Status: initial design 0.2. The user decided on internal UI/Rust/Hyprland/TOML; the module organization and process model below remain proposals. `src/` implements only an M0 slice: Wayland surfaces, the Hyprland adapter, the GLES/EGL render path, the bar, config validation, and `doctor`.
 
 ## 1. System boundaries and modules
 
@@ -36,7 +36,9 @@ Frame phases: apply events/update → measure/layout if geometry changed → ren
 
 Each output tracks logical size, scale, transform, buffer size, and resource generation. Hit testing uses logical coordinates; visual clips match hit regions. Check preferred scale and fractional-scale/viewporter support; document integer-scale fallbacks. Scale changes invalidate related text/geometry caches. Hidden surfaces without animation needs do not continuously request frames.
 
-The renderer is not selected: see [ADR-0004](docs/adr/0004-renderer-spike.md). Define a minimal interface for shapes, text runs, images, clips, and presentation. A replaceable backend is not a promise to support multiple production renderers in V1.
+The renderer is GLES/EGL with glow ([ADR-0006](docs/adr/0006-renderer-criteria.md)). `src/render.rs` owns the backend-neutral interface: a `Frame` is a clear colour plus solid rects and glyph quads, and an `Atlas` rasterizes a glyph the first time it is drawn and reuses it afterwards. Text is shaped and rasterized during frame construction, never by a backend.
+`src/render/gl.rs` presents a frame on one layer surface: one EGL context and window surface per output, `make_current` before every draw because outputs do not share a context, a dynamic vertex buffer rebuilt from the frame, a full atlas upload only when its version changed, and `swap_buffers` as the surface commit. Surfaces own their atlas and presenter, and the presenter drops before the layer surface whose `wl_surface` it wraps.
+`render::rasterize` is the reference implementation for tests: it consumes the same frame and atlas and returns a pixmap. It is not a user-selectable fallback; a second production backend is not promised for V1. No frame loop is added: frames are still built only from events, configure and the minute tick.
 
 ### Launcher accessibility spike
 

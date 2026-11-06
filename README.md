@@ -4,7 +4,7 @@
 
 Hayu is a Rust-based Wayland desktop shell for Hyprland users, with an internal UI foundation and TOML configuration. Noctalia is a reference for an integrated desktop experience; Hayu's requirements and implementation are defined independently.
 
-**Status: M0 prototype, November 5, 2026 (Asia/Jakarta).** The planning documents below still define V1. The repository now also contains an M0 code slice: a layer-shell bar with workspaces, clock, and window title, a keyboard-driven application launcher reachable through a local control socket, `hayu config check`, and `hayu doctor`. The renderer is decided (GLES/EGL, ADR-0006) but both surfaces still draw through tiny-skia. No other V1 feature exists and no benchmark of the V1 profiles has been run. “First release” means the first product release that meets the entire V1 scope, rather than this M0 prototype.
+**Status: M0 prototype, November 5, 2026 (Asia/Jakarta).** The planning documents below still define V1. The repository now also contains an M0 code slice: a layer-shell bar with workspaces, clock, and window title, a keyboard-driven application launcher reachable through a local control socket, `hayu config check`, and `hayu doctor`. The renderer is GLES/EGL with glow (ADR-0006): both surfaces draw through it, and a tiny-skia rasterizer is kept only as the test reference. No other V1 feature exists and no benchmark of the V1 profiles has been run. “First release” means the first product release that meets the entire V1 scope, rather than this M0 prototype.
 
 ## User decisions
 
