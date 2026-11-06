@@ -206,9 +206,18 @@ struct Bar {
 struct Ime {
     object: ZwpTextInputV3,
     enabled: bool,
+    /// Commit requests issued so far; `done` carries the matching serial.
+    serial: u32,
     pending_preedit: Option<String>,
     pending_commit: Option<String>,
     pending_delete: u32,
+}
+impl Ime {
+    /// Commit the pending requests and count them, because `done` echoes it.
+    fn commit(&mut self) {
+        self.object.commit();
+        self.serial = self.serial.wrapping_add(1);
+    }
 }
 pub struct State {
     registry_state: RegistryState,
@@ -354,8 +363,13 @@ impl State {
         if let Err(error) = ipc::write_response(&mut stream, &response) {
             eprintln!("hayu: cannot answer control request: {error}");
         }
-        if quit && let Some(signal) = &self.loop_signal {
-            signal.stop();
+        if quit {
+            // Text input must be disabled and committed before the surface and
+            // the object go away, not just dropped with the connection.
+            self.close_launcher();
+            if let Some(signal) = &self.loop_signal {
+                signal.stop();
+            }
         }
     }
 
@@ -467,6 +481,7 @@ impl State {
         self.ime = Some(Ime {
             object,
             enabled: false,
+            serial: 0,
             pending_preedit: None,
             pending_commit: None,
             pending_delete: 0,
@@ -499,7 +514,7 @@ impl State {
             return;
         }
         ime.object.disable();
-        ime.object.commit();
+        ime.commit();
         ime.enabled = false;
         ime.pending_preedit = None;
         ime.pending_commit = None;
@@ -542,7 +557,7 @@ impl State {
             zwp_text_input_v3::ContentPurpose::Normal,
         );
         ime.object.set_cursor_rectangle(x, y, width, height);
-        ime.object.commit();
+        ime.commit();
     }
     fn ime_enter(&mut self, surface: &wl_surface::WlSurface) {
         if self.launcher.is_open() && self.ime_is_launcher(surface) {
@@ -555,13 +570,28 @@ impl State {
         }
     }
     /// Apply the pending input-method state in the order the protocol requires.
-    fn ime_done(&mut self) {
+    ///
+    /// The compositor answers every commit request with `done`, so an empty
+    /// one must not trigger a draw and sync of its own: that would echo
+    /// forever.
+    fn ime_done(&mut self, serial: u32) {
         let Some(ime) = self.ime.as_mut() else {
             return;
         };
+        let current = serial == ime.serial;
         let preedit = ime.pending_preedit.take();
         let commit = ime.pending_commit.take();
         let delete = std::mem::take(&mut ime.pending_delete);
+        let preedit_changed = preedit
+            .as_deref()
+            .is_some_and(|text| text != self.launcher.preedit());
+        let query_changed = commit.is_some() || delete > 0;
+        if !preedit_changed && !query_changed {
+            return;
+        }
+        // Protocol order: drop the old preedit, delete, insert the commit,
+        // then install the new preedit.
+        self.launcher.set_preedit(String::new());
         if delete > 0 {
             self.launcher.delete_before(delete);
         }
@@ -579,7 +609,12 @@ impl State {
             );
         }
         self.draw_launcher();
-        self.ime_sync(zwp_text_input_v3::ChangeCause::InputMethod);
+        // Only a changed query needs new surrounding text. Re-sending it for a
+        // preedit-only update makes the input method repeat the same preedit,
+        // which would echo forever.
+        if current && query_changed {
+            self.ime_sync(zwp_text_input_v3::ChangeCause::InputMethod);
+        }
     }
 
     /// Whether the config asks for a bar on this output name. `*` matches all.
@@ -664,17 +699,19 @@ impl State {
         if std::env::var_os("HAYU_DEBUG_KEYS").is_some() {
             let (query, selected, results) = self.launcher.debug_state();
             eprintln!(
-                "hayu: key keysym=0x{:x} utf8={:?} open={} before query={query:?} sel={selected} results={results}",
+                "hayu: key keysym=0x{:x} utf8={:?} open={} before query={query:?} sel={selected} preedit={} results={results}",
                 event.keysym.raw(),
                 event.utf8,
                 self.launcher.is_open(),
+                self.launcher.preedit().len(),
             );
         }
         let action = self.launcher.key(&event);
         if std::env::var_os("HAYU_DEBUG_KEYS").is_some() {
             let (query, selected, results) = self.launcher.debug_state();
             eprintln!(
-                "hayu: key -> {action:?} query={query:?} sel={selected} results={results} top={:?}",
+                "hayu: key -> {action:?} query={query:?} sel={selected} preedit={} results={results} top={:?}",
+                self.launcher.preedit().len(),
                 self.launcher.debug_results()
             );
         }
@@ -1201,7 +1238,7 @@ impl Dispatch<ZwpTextInputV3, ()> for State {
                     ime.pending_delete = before_length;
                 }
             }
-            zwp_text_input_v3::Event::Done { .. } => state.ime_done(),
+            zwp_text_input_v3::Event::Done { serial } => state.ime_done(serial),
             _ => {}
         }
     }

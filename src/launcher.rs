@@ -263,6 +263,12 @@ impl Launcher {
             KEY_KP_Enter as KP_ENTER, KEY_Return as RETURN, KEY_Up as UP,
         };
         match event.keysym.raw() {
+            // The input method may leave a preedit on screen, so Escape drops
+            // that before it can leave the launcher.
+            ESCAPE if !self.preedit.is_empty() => {
+                self.preedit.clear();
+                Action::Changed
+            }
             ESCAPE => Action::Close,
             UP => {
                 if self.selected > 0 {
@@ -605,6 +611,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn escape_clears_preedit_before_closing() {
+        use smithay_client_toolkit::seat::keyboard::KeyEvent;
+        let escape = KeyEvent {
+            time: 0,
+            raw_code: 0,
+            keysym: xkbcommon::xkb::Keysym::new(xkbcommon::xkb::keysyms::KEY_Escape),
+            utf8: None,
+        };
+        let mut launcher = Launcher::new(vec![entry("a.desktop", "Alpha")]);
+        launcher.begin_open();
+        launcher.set_preedit("にほ".into());
+        assert_eq!(launcher.key(&escape), Action::Changed);
+        assert_eq!(launcher.preedit(), "");
+        assert_eq!(launcher.key(&escape), Action::Close);
+    }
     #[test]
     fn ime_edits_query_on_char_boundaries() {
         let mut launcher = Launcher::new(vec![entry("a.desktop", "Alpha")]);
