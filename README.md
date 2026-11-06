@@ -49,6 +49,7 @@ cargo test
 ./target/release/hayu config check examples/config.toml
 ./target/release/hayu run
 ./target/release/hayu launcher toggle   # with `hayu run` active
+./target/release/hayu reload             # with `hayu run` active
 ./target/release/hayu quit
 ```
 

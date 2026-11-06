@@ -18,6 +18,7 @@ cargo test                                 # 40 unit tests
 ./target/release/hayu run                  # needs a live Hyprland session
 ./target/release/hayu launcher toggle      # needs `hayu run`; also open|close
 ./target/release/hayu quit                 # stops the running shell
+./target/release/hayu reload               # re-reads config; needs `hayu run`
 ./target/release/hayu-gpu-spike --backend gl --mode offscreen --frames 300 --json
 cargo build --release --features wgpu      # opt-in backend for the spike only
 ```
@@ -27,6 +28,10 @@ smoke checks and stop it with SIGTERM; do not leave it running. `hayu run` reads
 only `$XDG_CONFIG_HOME/hayu/config.toml` (no `--config` flag yet). Client
 commands talk to `$XDG_RUNTIME_DIR/hayu/<session-id>/control.sock`; without a
 running shell they exit non-zero with a readable message.
+
+`hayu reload` applies the theme, clock format, bar height/position and
+`launcher.enabled` only; `bar.outputs` and the widget lists still need a
+restart. An invalid file exits non-zero and leaves the running state untouched.
 
 ## Do not overclaim
 

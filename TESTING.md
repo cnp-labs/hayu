@@ -1,6 +1,6 @@
 # Testing strategy and release gate
 
-Status: plan with a partial M0 suite. `cargo test` runs 40 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, scale 2 and two outputs were exercised live (see below); IME, screen-reader, soak, fractional scale and mixed per-output scales have not been run.
+Status: plan with a partial M0 suite. `cargo test` runs 40 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, scale 2, two outputs and config reload were exercised live (see below); IME, screen-reader, soak, fractional scale and mixed per-output scales have not been run.
 
 ## Testing layers
 
@@ -88,6 +88,35 @@ Hyprland uses the Lua config provider, where `hyprctl keyword` answers
   used.
 - After the run, `HDMI-A-1` was returned to scale 1 and the full suite passed
   again.
+
+### Config reload (November 6, 2026)
+Run at commit `2ff205e` on the same session (Hyprland 0.57.0, one 1366×768
+output at scale 1). A real bar was started from a temporary `XDG_CONFIG_HOME`,
+the config file was rewritten between steps, and each `hayu reload` went through
+the control socket. Geometry came from `hyprctl layers -j`; nothing here was
+inferred from the config file alone.
+
+| Check | Result |
+| --- | --- |
+| Initial 32px top bar maps at y=0 | Live pass |
+| Reload to 40px bottom exits 0 and the bar maps at y=728, h=40 | Live pass |
+| Launcher still opens and closes after a geometry reload | Live pass |
+| Invalid file (`bar.height = 500`) exits 1 and names `bar.height` | Live pass |
+| After the rejected reload the bar is still 40px bottom and the launcher works | Live pass |
+| `launcher.enabled=false` makes `launcher toggle` and `launcher open` exit 1 | Live pass |
+| Reloading `enabled=false` while the overlay is open closes it | Live pass |
+| Re-enabling maps the launcher again; `quit` exits 0 | Live pass |
+| Theme/accent and clock-format change | Applied, no pixel diff |
+| `bar.outputs` or a widget-list change | Needs restart |
+
+- Method: the driver is `/tmp/opencode/reload-live.sh` (not in the repository);
+  it writes small config files with `printf`, calls `hayu reload` between steps,
+  and reads `h`/`y` of the `hayu` layer plus the `hayu-launcher` layer count.
+- Limits: one output, integral scale, no screenshot tool, so a theme or clock
+  change is only known to have been applied to the state, not confirmed on
+  screen. Widget lists and output mapping were not expected to change.
+- Unit tests cannot reach this path without a Wayland session; the IPC parser
+  change (`reload`) is pinned by `parses_and_serializes_requests`.
 
 ### Terminal fallback arguments (November 5, 2026)
 
