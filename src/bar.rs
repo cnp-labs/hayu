@@ -35,6 +35,7 @@ use wayland_protocols::wp::text_input::zv3::client::{
     zwp_text_input_v3::{self, ZwpTextInputV3},
 };
 
+use crate::a11y::A11y;
 use crate::config::{self, Config};
 use crate::desktop;
 use crate::hyprland::{self, Event, Hyprland, Snapshot, Workspace};
@@ -95,6 +96,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
         clock,
         bars: HashMap::new(),
         launcher: Launcher::new(Vec::new()),
+        a11y: A11y::new(),
         ipc_path: None,
         loop_signal: Some(event_loop.get_signal()),
     };
@@ -102,6 +104,9 @@ pub fn run(cfg: Config) -> Result<(), String> {
         eprintln!("hayu: Hyprland IPC not found; bar will show the clock only");
     }
     state.resync();
+    // Publish the hidden window before any launcher open, so a screen reader
+    // that connects early sees a stable tree instead of an empty application.
+    state.sync_a11y();
 
     // Populate outputs (and create their bars) before entering the event loop.
     event_queue
@@ -242,6 +247,7 @@ pub struct State {
     clock: String,
     bars: HashMap<u32, Bar>,
     launcher: Launcher,
+    a11y: A11y,
     ipc_path: Option<PathBuf>,
     loop_signal: Option<LoopSignal>,
 }
@@ -456,7 +462,7 @@ impl State {
             ) {
                 Ok(surface) => self.launcher.show(surface),
                 Err(error) => {
-                    self.launcher.close();
+                    self.close_launcher();
                     return Err(error);
                 }
             }
@@ -469,6 +475,7 @@ impl State {
     fn close_launcher(&mut self) {
         self.ime_disable();
         self.launcher.close();
+        self.sync_a11y();
     }
     fn ime_attach_seat(&mut self, qh: &QueueHandle<Self>, seat: &wl_seat::WlSeat) {
         if self.ime.is_some() {
@@ -743,6 +750,11 @@ impl State {
                 started.elapsed().as_secs_f64() * 1000.0
             );
         }
+        self.sync_a11y();
+    }
+
+    fn sync_a11y(&mut self) {
+        self.a11y.sync(&self.launcher);
     }
 
     fn create_bar(&mut self, output: wl_output::WlOutput) {
@@ -1014,6 +1026,7 @@ impl OutputHandler for State {
         if self.launcher.output_id() == Some(id) {
             self.ime_disable();
             self.launcher.forget_surface();
+            self.sync_a11y();
         }
         self.bars.remove(&id);
     }
@@ -1023,6 +1036,7 @@ impl LayerShellHandler for State {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
         if self.launcher.on_layer_closed(layer) {
             self.ime_disable();
+            self.sync_a11y();
             return;
         }
         let key = self

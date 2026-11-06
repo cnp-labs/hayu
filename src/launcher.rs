@@ -2,15 +2,15 @@ use cosmic_text::{FontSystem, SwashCache};
 use smithay_client_toolkit::{
     compositor::CompositorState,
     shell::{
-        WaylandSurface,
         wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface},
+        WaylandSurface,
     },
-    shm::{Shm, slot::SlotPool},
+    shm::{slot::SlotPool, Shm},
 };
 use tiny_skia::Pixmap;
 use wayland_client::{
-    Proxy, QueueHandle,
     protocol::{wl_output, wl_shm},
+    Proxy, QueueHandle,
 };
 
 use crate::bar::State;
@@ -150,6 +150,13 @@ impl Launcher {
     }
     pub fn preedit(&self) -> &str {
         &self.preedit
+    }
+    /// Result rows as currently filtered, for the accessibility tree.
+    pub fn results(&self) -> &[Entry] {
+        &self.results
+    }
+    pub fn selected(&self) -> usize {
+        self.selected
     }
     /// Append text committed by the input method at the end of the query.
     pub fn insert_text(&mut self, text: &str) {
