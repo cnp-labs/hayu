@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -7,7 +8,7 @@ use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction};
 use chrono::{Local, Timelike};
-use cosmic_text::{FontSystem, SwashCache};
+use cosmic_text::FontSystem;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -23,12 +24,11 @@ use smithay_client_toolkit::{
         Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
         LayerSurfaceConfigure,
     },
-    shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_seat, wl_surface},
 };
 use wayland_protocols::wp::text_input::zv3::client::{
     zwp_text_input_manager_v3::ZwpTextInputManagerV3,
@@ -41,7 +41,7 @@ use crate::desktop;
 use crate::hyprland::{self, Event, Hyprland, Snapshot, Workspace};
 use crate::ipc::{self, Command as IpcCommand};
 use crate::launcher::{self, Launcher};
-use crate::render::{self, Scene, Theme};
+use crate::render::{self, Atlas, Scene, Theme, gl::GlPresenter};
 
 pub fn run(cfg: Config) -> Result<(), String> {
     let conn =
@@ -53,7 +53,6 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .map_err(|e| format!("wl_compositor unavailable: {e}"))?;
     let layer_shell =
         LayerShell::bind(&globals, &qh).map_err(|e| format!("wlr-layer-shell unavailable: {e}"))?;
-    let shm = Shm::bind(&globals, &qh).map_err(|e| format!("wl_shm unavailable: {e}"))?;
     let output_state = OutputState::new(&globals, &qh);
     let registry_state = RegistryState::new(&globals);
     let seat_state = SeatState::new(&globals, &qh);
@@ -78,7 +77,6 @@ pub fn run(cfg: Config) -> Result<(), String> {
         output_state,
         compositor,
         layer_shell,
-        shm,
         qh: qh.clone(),
         seat_state,
         keyboard: None,
@@ -88,7 +86,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
         cfg,
         theme,
         fonts,
-        cache: SwashCache::new(),
+        display_ptr: conn.display().id().as_ptr() as *mut c_void,
         hypr: Hyprland::discover(),
         snapshot: None,
         active_workspace: 0,
@@ -199,8 +197,10 @@ fn duration_to_next_minute() -> Duration {
 
 struct Bar {
     output: wl_output::WlOutput,
+    // Must drop before `layer`: the EGL surface wraps `layer`'s wl_surface.
+    presenter: Option<GlPresenter>,
+    atlas: Atlas,
     layer: LayerSurface,
-    pool: SlotPool,
     width: u32,
     height: u32,
     bottom: bool,
@@ -229,7 +229,6 @@ pub struct State {
     output_state: OutputState,
     compositor: CompositorState,
     layer_shell: LayerShell,
-    shm: Shm,
     qh: QueueHandle<State>,
     seat_state: SeatState,
     keyboard: Option<wl_keyboard::WlKeyboard>,
@@ -239,7 +238,7 @@ pub struct State {
     cfg: Config,
     theme: Theme,
     fonts: FontSystem,
-    cache: SwashCache,
+    display_ptr: *mut c_void,
     hypr: Option<Hyprland>,
     snapshot: Option<Snapshot>,
     active_workspace: i64,
@@ -455,7 +454,6 @@ impl State {
             match launcher::Surface::create(
                 &self.compositor,
                 &self.layer_shell,
-                &self.shm,
                 &self.qh,
                 &output,
                 scale,
@@ -743,7 +741,7 @@ impl State {
     fn draw_launcher(&mut self) {
         let started = std::time::Instant::now();
         self.launcher
-            .draw(&self.theme, &mut self.fonts, &mut self.cache);
+            .draw(&self.theme, &mut self.fonts, self.display_ptr);
         if std::env::var_os("HAYU_DEBUG_KEYS").is_some() {
             eprintln!(
                 "hayu: launcher frame {:.2} ms",
@@ -784,19 +782,13 @@ impl State {
         layer.set_exclusive_zone(height as i32);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.commit();
-        let pool = match SlotPool::new(1, &self.shm) {
-            Ok(pool) => pool,
-            Err(err) => {
-                eprintln!("hayu: cannot create shm pool: {err}");
-                return;
-            }
-        };
         self.bars.insert(
             output.id().protocol_id(),
             Bar {
                 output,
                 layer,
-                pool,
+                presenter: None,
+                atlas: Atlas::new(),
                 width: scale as u32 * 256,
                 height,
                 bottom: self.cfg.bar.position == "bottom",
@@ -828,7 +820,7 @@ impl State {
                 &workspaces,
                 &title,
                 &mut self.fonts,
-                &mut self.cache,
+                self.display_ptr,
             );
         }
     }
@@ -867,7 +859,7 @@ fn draw_bar(
     workspaces: &[Workspace],
     title: &str,
     fonts: &mut FontSystem,
-    cache: &mut SwashCache,
+    display_ptr: *mut c_void,
 ) {
     if !bar.configured || bar.width == 0 || bar.height == 0 {
         return;
@@ -885,31 +877,26 @@ fn draw_bar(
         workspaces,
         active_workspace,
     };
-    let Some(pixmap) = render::draw(&scene, fonts, cache) else {
+    let Some(frame) = render::build(&scene, fonts, &mut bar.atlas) else {
         return;
     };
-    let stride = (width * 4) as i32;
-    let (buffer, canvas) = match bar.pool.create_buffer(
-        width as i32,
-        height as i32,
-        stride,
-        wl_shm::Format::Argb8888,
-    ) {
-        Ok(pair) => pair,
-        Err(err) => {
-            eprintln!("hayu: cannot create shm buffer: {err}");
-            return;
-        }
-    };
-    render::copy_to_shm(&pixmap, canvas);
     let surface = bar.layer.wl_surface();
     let _ = bar.layer.set_buffer_scale(scale as u32);
-    surface.damage_buffer(0, 0, width as i32, height as i32);
-    if let Err(err) = buffer.attach_to(surface) {
-        eprintln!("hayu: cannot attach buffer: {err}");
-        return;
+    if bar.presenter.is_none() {
+        let surface_ptr = surface.id().as_ptr() as *mut c_void;
+        match GlPresenter::new(display_ptr, surface_ptr, width, height) {
+            Ok(presenter) => bar.presenter = Some(presenter),
+            Err(err) => {
+                eprintln!("hayu: cannot create bar GL surface: {err}");
+                return;
+            }
+        }
     }
-    bar.layer.commit();
+    if let Some(presenter) = bar.presenter.as_mut() {
+        if let Err(err) = presenter.render(&frame, &bar.atlas) {
+            eprintln!("hayu: bar render failed: {err}");
+        }
+    }
 }
 
 impl CompositorHandler for State {
@@ -1255,11 +1242,6 @@ impl Dispatch<ZwpTextInputV3, ()> for State {
             zwp_text_input_v3::Event::Done { serial } => state.ime_done(serial),
             _ => {}
         }
-    }
-}
-impl ShmHandler for State {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
     }
 }
 

@@ -125,18 +125,7 @@ fn offscreen(backend: Backend, scene: &gpu::scene::Scene, frames: u32) -> Result
                 renderer: "tiny-skia 0.12".into(),
             })
         }
-        Backend::Gl => {
-            #[cfg(feature = "gl")]
-            {
-                gpu::gl::offscreen(scene, frames)
-            }
-            #[cfg(not(feature = "gl"))]
-            {
-                Err(gpu::Error::Usage(
-                    "this binary was built without the gl feature".into(),
-                ))
-            }
-        }
+        Backend::Gl => gpu::gl::offscreen(scene, frames),
         Backend::Wgpu => {
             #[cfg(feature = "wgpu")]
             {

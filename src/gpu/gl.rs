@@ -1,5 +1,3 @@
-#![cfg(feature = "gl")]
-
 use std::num::NonZeroU32;
 use std::os::raw::c_void;
 use std::ptr::NonNull;

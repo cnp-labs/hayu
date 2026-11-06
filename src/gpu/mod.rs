@@ -4,7 +4,6 @@ pub mod atlas;
 pub mod cpu;
 pub mod scene;
 
-#[cfg(feature = "gl")]
 pub mod gl;
 #[cfg(feature = "wgpu")]
 pub mod wgpu;

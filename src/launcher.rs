@@ -1,21 +1,18 @@
-use cosmic_text::{FontSystem, SwashCache};
+use std::os::raw::c_void;
+
+use cosmic_text::FontSystem;
 use smithay_client_toolkit::{
     compositor::CompositorState,
     shell::{
         wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface},
         WaylandSurface,
     },
-    shm::{slot::SlotPool, Shm},
 };
-use tiny_skia::Pixmap;
-use wayland_client::{
-    protocol::{wl_output, wl_shm},
-    Proxy, QueueHandle,
-};
+use wayland_client::{protocol::wl_output, Proxy, QueueHandle};
 
 use crate::bar::State;
 use crate::desktop::{self, Entry};
-use crate::render::{self, Theme};
+use crate::render::{self, gl::GlPresenter, Atlas, Frame, Theme};
 
 pub const WIDTH: u32 = 560;
 pub const HEIGHT: u32 = 420;
@@ -27,8 +24,10 @@ pub const INPUT_SIZE: f32 = 18.0;
 pub const INPUT_Y: f32 = 17.0;
 
 pub struct Surface {
+    // Must drop before `layer`: the EGL surface wraps `layer`'s wl_surface.
+    presenter: Option<GlPresenter>,
+    atlas: Atlas,
     pub layer: LayerSurface,
-    pool: SlotPool,
     pub output_id: u32,
     pub width: u32,
     pub height: u32,
@@ -40,7 +39,6 @@ impl Surface {
     pub fn create(
         compositor: &CompositorState,
         shell: &LayerShell,
-        shm: &Shm,
         qh: &QueueHandle<State>,
         output: &wl_output::WlOutput,
         scale: i32,
@@ -59,11 +57,10 @@ impl Surface {
         layer.set_exclusive_zone(0);
         layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         layer.commit();
-        let pool =
-            SlotPool::new(1, shm).map_err(|e| format!("cannot create launcher shm pool: {e}"))?;
         Ok(Self {
+            presenter: None,
+            atlas: Atlas::new(),
             layer,
-            pool,
             output_id: output.id().protocol_id(),
             width: WIDTH,
             height: HEIGHT,
@@ -320,14 +317,14 @@ impl Launcher {
         self.selected = self.selected.min(self.results.len().saturating_sub(1));
     }
 
-    pub fn draw(&mut self, theme: &Theme, fonts: &mut FontSystem, cache: &mut SwashCache) {
+    pub fn draw(&mut self, theme: &Theme, fonts: &mut FontSystem, display_ptr: *mut c_void) {
         let Some(surface) = &mut self.surface else {
             return;
         };
         if !self.open || !surface.configured {
             return;
         }
-        let Some(pixmap) = draw_frame(
+        let Some(frame) = draw_frame(
             theme,
             &self.query,
             &self.preedit,
@@ -338,34 +335,30 @@ impl Launcher {
             surface.height,
             surface.scale,
             fonts,
-            cache,
+            &mut surface.atlas,
         ) else {
             return;
         };
         let width = surface.width.saturating_mul(surface.scale as u32);
         let height = surface.height.saturating_mul(surface.scale as u32);
-        let stride = (width * 4) as i32;
-        let (buffer, canvas) = match surface.pool.create_buffer(
-            width as i32,
-            height as i32,
-            stride,
-            wl_shm::Format::Argb8888,
-        ) {
-            Ok(pair) => pair,
-            Err(error) => {
-                eprintln!("hayu: cannot create launcher shm buffer: {error}");
-                return;
-            }
-        };
-        render::copy_to_shm(&pixmap, canvas);
         let wl_surface = surface.layer.wl_surface();
         let _ = surface.layer.set_buffer_scale(surface.scale as u32);
-        wl_surface.damage_buffer(0, 0, width as i32, height as i32);
-        if let Err(error) = buffer.attach_to(wl_surface) {
-            eprintln!("hayu: cannot attach launcher buffer: {error}");
-            return;
+        if surface.presenter.is_none() {
+            let surface_ptr = wl_surface.id().as_ptr() as *mut c_void;
+            match GlPresenter::new(display_ptr, surface_ptr, width, height) {
+                Ok(presenter) => surface.presenter = Some(presenter),
+                Err(error) => {
+                    eprintln!("hayu: cannot create launcher GL surface: {error}");
+                    return;
+                }
+            }
         }
-        surface.layer.commit();
+        let Some(presenter) = surface.presenter.as_mut() else {
+            return;
+        };
+        if let Err(error) = presenter.render(&frame, &surface.atlas) {
+            eprintln!("hayu: launcher render failed: {error}");
+        }
     }
 }
 
@@ -381,33 +374,21 @@ pub fn draw_frame(
     height: u32,
     scale: i32,
     fonts: &mut FontSystem,
-    cache: &mut SwashCache,
-) -> Option<Pixmap> {
-    if width == 0 || height == 0 {
-        return None;
-    }
+    atlas: &mut Atlas,
+) -> Option<Frame> {
     let scale = scale.max(1) as f32;
     let pixel_width = width.saturating_mul(scale as u32);
     let pixel_height = height.saturating_mul(scale as u32);
-    let mut pixmap = Pixmap::new(pixel_width, pixel_height)?;
-    render::fill(
-        &mut pixmap,
-        0.0,
-        0.0,
-        pixel_width as f32,
-        pixel_height as f32,
-        theme.bg,
-    );
+    let mut frame = Frame::new(pixel_width, pixel_height, theme.bg)?;
     if fonts.db().is_empty() {
-        return Some(pixmap);
+        return Some(frame);
     }
 
     let pad = PAD * scale;
     let input_size = INPUT_SIZE * scale;
     let input_y = INPUT_Y * scale;
     let divider_y = 56.0 * scale;
-    render::fill(
-        &mut pixmap,
+    frame.fill(
         pad,
         divider_y,
         pixel_width as f32 - pad * 2.0,
@@ -426,10 +407,9 @@ pub fn draw_frame(
     );
     let query_x = pad;
     if query.is_empty() && preedit.is_empty() {
-        render::draw_text(
-            &mut pixmap,
+        frame.text(
             fonts,
-            cache,
+            atlas,
             "Search applications",
             query_x,
             input_y,
@@ -437,10 +417,9 @@ pub fn draw_frame(
             theme.muted,
         );
     } else {
-        render::draw_text(
-            &mut pixmap,
+        frame.text(
             fonts,
-            cache,
+            atlas,
             &shown_query,
             query_x,
             input_y,
@@ -450,10 +429,9 @@ pub fn draw_frame(
     }
     let query_end = query_x + query_width;
     if !shown_preedit.is_empty() {
-        render::draw_text(
-            &mut pixmap,
+        frame.text(
             fonts,
-            cache,
+            atlas,
             &shown_preedit,
             query_end,
             input_y,
@@ -462,8 +440,7 @@ pub fn draw_frame(
         );
     }
     let cursor_x = query_end + render::text_width(fonts, &shown_preedit, input_size) + 1.0 * scale;
-    render::fill(
-        &mut pixmap,
+    frame.fill(
         cursor_x,
         input_y + 1.0 * scale,
         2.0 * scale,
@@ -474,10 +451,9 @@ pub fn draw_frame(
     let row_height = 36.0 * scale;
     let results_y = 70.0 * scale;
     if results.is_empty() {
-        render::draw_text(
-            &mut pixmap,
+        frame.text(
             fonts,
-            cache,
+            atlas,
             "No matching applications",
             pad,
             results_y + 8.0 * scale,
@@ -497,8 +473,7 @@ pub fn draw_frame(
             let y = results_y + row as f32 * row_height;
             let selected_row = index == selected;
             if selected_row {
-                render::fill(
-                    &mut pixmap,
+                frame.fill(
                     10.0 * scale,
                     y,
                     pixel_width as f32 - 20.0 * scale,
@@ -518,20 +493,18 @@ pub fn draw_frame(
             let name = render::ellipsize(&entry.name, name_max.max(20.0), |text| {
                 render::text_width(fonts, text, 14.0 * scale)
             });
-            render::draw_text(
-                &mut pixmap,
+            frame.text(
                 fonts,
-                cache,
+                atlas,
                 &name,
                 pad,
                 y + 8.0 * scale,
                 14.0 * scale,
                 text_color,
             );
-            render::draw_text(
-                &mut pixmap,
+            frame.text(
                 fonts,
-                cache,
+                atlas,
                 &id_text,
                 pixel_width as f32 - pad - id_width,
                 y + 10.0 * scale,
@@ -550,10 +523,9 @@ pub fn draw_frame(
     let footer = render::ellipsize(footer, pixel_width as f32 - pad * 2.0, |text| {
         render::text_width(fonts, text, footer_size)
     });
-    render::draw_text(
-        &mut pixmap,
+    frame.text(
         fonts,
-        cache,
+        atlas,
         &footer,
         pad,
         footer_y,
@@ -565,7 +537,7 @@ pub fn draw_frame(
         },
     );
 
-    Some(pixmap)
+    Some(frame)
 }
 
 #[cfg(test)]
@@ -592,11 +564,12 @@ mod tests {
         let results = desktop::filter(&entries, "fi");
         let theme = Theme::from_config("dark", "#8AB4F8");
         let mut fonts = FontSystem::new();
-        let mut cache = SwashCache::new();
-        let pixmap = draw_frame(
-            &theme, "fi", "", &results, 0, None, WIDTH, HEIGHT, 2, &mut fonts, &mut cache,
+        let mut atlas = Atlas::new();
+        let frame = draw_frame(
+            &theme, "fi", "", &results, 0, None, WIDTH, HEIGHT, 2, &mut fonts, &mut atlas,
         )
         .expect("launcher frame");
+        let pixmap = render::rasterize(&frame, &atlas).expect("launcher pixels");
         assert_eq!(pixmap.width(), WIDTH * 2);
         assert_eq!(pixmap.height(), HEIGHT * 2);
         let accent = theme.accent;
@@ -610,7 +583,7 @@ mod tests {
         write_ppm("/tmp/hayu-launcher.ppm", &pixmap);
     }
 
-    fn write_ppm(path: &str, pixmap: &Pixmap) {
+    fn write_ppm(path: &str, pixmap: &tiny_skia::Pixmap) {
         let mut file = std::fs::File::create(path).expect("create ppm");
         write!(file, "P6\n{} {}\n255\n", pixmap.width(), pixmap.height()).unwrap();
         for px in pixmap.data().chunks_exact(4) {

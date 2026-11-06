@@ -10,15 +10,15 @@ use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::registry_handlers;
-use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
     LayerSurfaceConfigure,
 };
+use smithay_client_toolkit::shell::WaylandSurface;
 use wayland_client::protocol::{wl_output, wl_surface};
-use wayland_client::{Connection, Proxy, QueueHandle, globals::registry_queue_init};
+use wayland_client::{globals::registry_queue_init, Connection, Proxy, QueueHandle};
 
-use super::scene::{LOGICAL_HEIGHT, LOGICAL_WIDTH, Scene};
+use super::scene::{Scene, LOGICAL_HEIGHT, LOGICAL_WIDTH};
 use super::{Backend, Error, Result};
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -118,11 +118,7 @@ pub fn run(
         event_queue
             .roundtrip(&mut state)
             .map_err(|err| Error::Wayland(format!("roundtrip failed: {err}")))?;
-        if state
-            .bars
-            .values()
-            .any(|bar| bar.presenter.is_some())
-        {
+        if state.bars.values().any(|bar| bar.presenter.is_some()) {
             break;
         }
     }
@@ -279,11 +275,7 @@ impl State {
         } else {
             width
         };
-        bar.height = if height == 0 {
-            LOGICAL_HEIGHT
-        } else {
-            height
-        };
+        bar.height = if height == 0 { LOGICAL_HEIGHT } else { height };
         bar.configured = true;
         let physical_width = bar.width * bar.scale;
         let physical_height = bar.height * bar.scale;
@@ -321,25 +313,13 @@ fn create_presenter(
     scene: &Scene,
 ) -> Result<Box<dyn Presenter>> {
     match backend {
-        Backend::Gl => {
-            #[cfg(feature = "gl")]
-            {
-                Ok(Box::new(super::gl::GlPresenter::new(
-                    display_ptr,
-                    surface_ptr,
-                    width,
-                    height,
-                    scene,
-                )?))
-            }
-            #[cfg(not(feature = "gl"))]
-            {
-                let _ = (display_ptr, surface_ptr, width, height, scene);
-                Err(Error::Usage(
-                    "this binary was built without the gl feature".into(),
-                ))
-            }
-        }
+        Backend::Gl => Ok(Box::new(super::gl::GlPresenter::new(
+            display_ptr,
+            surface_ptr,
+            width,
+            height,
+            scene,
+        )?)),
         Backend::Wgpu => {
             #[cfg(feature = "wgpu")]
             {
