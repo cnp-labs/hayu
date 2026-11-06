@@ -1,8 +1,8 @@
 # ADR-0007 — Text input and IME through text-input-v3
-Date: November 6, 2026. Status: **accepted and implemented** in `4de4112`.
-I1-I10 were run with fcitx5 and fcitx5-anthy (results in TESTING.md); I4 is the
-only criterion that did not pass, because the input method consumes the second
-Escape after a cancelled composition.
+Date: November 6, 2026. Status: **accepted**; the slice is implemented in
+`4de4112` and I1-I10 were run with fcitx5 and fcitx5-anthy (results in
+TESTING.md). IME acceptance is **not complete**: I4 does not pass, because the
+input method consumes the second Escape after a cancelled composition.
 
 ## Context
 The launcher is a layer-shell surface with an exclusive keyboard grab while it

@@ -196,7 +196,21 @@ printed the query only for the checks that need it.
 - The I4 exception comes from fcitx5-anthy keeping its own composition after
   the client drops the preedit; the protocol has no cancel request, so the
   client cannot clear it. It is recorded as an open interaction, not as
-  working behaviour.
+  working behaviour, and the rest of the IME run does not close it.
+
+  Reproduce it with the same setup as this section:
+
+  1. Start the input method (`fcitx5 --replace -d` against the temporary
+     `XDG_CONFIG_HOME`), then run `hayu launcher open`.
+  2. Activate anthy: `fcitx5-remote -o`; `fcitx5-remote` must answer `2` and
+     `fcitx5-remote -n` must answer `anthy`.
+  3. Type `nihon` with `tools/live/keyin`; the preedit appears and the result
+     list stays unchanged.
+  4. Press Escape once: the preedit disappears and `hyprctl layers -j` still
+     lists `hayu-launcher`.
+  5. Press Escape again: with `WAYLAND_DEBUG=1`, no `wl_keyboard.key` arrives
+     and the overlay stays mapped.
+  6. Press Escape a third time: the overlay closes.
 - Limits: no screenshot tool, so preedit rendering and the input method's own
   candidate popup were not inspected pixel by pixel; I1-I8 used the real output
   only; I9's output removal used a headless output, not a cable; preedit,
