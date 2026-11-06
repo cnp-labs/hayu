@@ -65,10 +65,26 @@ temporary `XDG_DATA_HOME`:
 Launched commands only touch files under `/tmp/hayu-live`, which the input
 suite recreates at start. Do not point them at anything else.
 
+## AT-SPI launcher check
+
+`a11y-suite.py` starts an isolated Hayu with three synthetic desktop entries and
+walks the AT-SPI tree while it types, moves the selection, closes and reopens
+the launcher. It needs `/usr/bin/python3` with PyGObject's `Atspi` typelib,
+`gdbus` and `at-spi2-core`. It refuses to run when another Hayu shell or control
+socket is present, sets `org.a11y.Status IsEnabled` only for the run and
+restores it, and keeps its log under `/tmp/opencode`.
+
+```
+/usr/bin/python3 tools/live/a11y-suite.py
+```
+
+It checks bus-visible names, roles, text values and the selected flag; it is
+read-only and does not prove screen-reader speech.
+
 ## Limits
 
 These are single-session checks, not a test suite: one output, integral scale,
 no screenshot comparison (there is no screenshot tool on the reference machine),
-and IME, fractional scaling, mixed per-output scales and accessibility are not
-covered. They also depend on the compositor keeping
+and IME, fractional scaling, mixed per-output scales and screen-reader speech
+are not covered. They also depend on the compositor keeping
 `zwp_virtual_keyboard_manager_v1` available to ordinary clients.

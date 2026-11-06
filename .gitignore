@@ -1,3 +1,4 @@
 /target
 *.log
 tools/live/keyin/target/
+__pycache__/

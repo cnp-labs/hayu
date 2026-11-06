@@ -38,6 +38,21 @@ Each output tracks logical size, scale, transform, buffer size, and resource gen
 
 The renderer is not selected: see [ADR-0004](docs/adr/0004-renderer-spike.md). Define a minimal interface for shapes, text runs, images, clips, and presentation. A replaceable backend is not a promise to support multiple production renderers in V1.
 
+### Launcher accessibility spike
+
+`src/a11y.rs` publishes a read-only AccessKit tree through `accesskit_unix`
+(AT-SPI). The UI thread copies launcher state after draws and on close or
+surface removal; a shared snapshot supplies the initial tree when accessibility
+activates later. Adapter callbacks run on its worker thread and do not access
+Wayland or renderer resources. No polling or frame timer is added.
+
+The open tree contains a window, a named search field with committed query
+value, and named result items with the active selection flag. Closing removes
+children and hides the root. This is a launcher-only spike, not the proposed
+component semantics system: actions, text editing/caret APIs, IME preedit,
+geometry and bar semantics are not covered. Screen reader acceptance remains
+separate from AT-SPI bus inspection; see TESTING.md.
+
 ## 5. Surfaces and focus
 
 The bar uses layer-shell and an exclusive zone matching its calculated position/height. The dock must not reserve space that conflicts with the bar. Panels/launcher/toasts/OSD have separate output and focus policies; do not create a full-screen overlay that captures all input by default.

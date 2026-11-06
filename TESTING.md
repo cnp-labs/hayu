@@ -216,6 +216,48 @@ printed the query only for the checks that need it.
   only; I9's output removal used a headless output, not a cable; preedit,
   commit and delete were the only text-input events exercised.
 
+### Launcher AT-SPI spike (November 6, 2026)
+
+Run at `c8017ee` on the same session (Hyprland 0.57.0, one 1366×768 output at
+scale 1) with `accesskit 0.25.2`, `accesskit_unix 0.24.1` and `at-spi2-core`.
+Orca and accerciser were not installed, so this records the AT-SPI tree, not
+speech. The session had `org.a11y.Status IsEnabled=false` and no assistive
+client; `tools/live/a11y-suite.py` sets it true for the run and restores the
+original value. Hayu ran from a temporary `XDG_CONFIG_HOME`, `XDG_DATA_HOME`
+and `XDG_RUNTIME_DIR` with three synthetic entries (`A11y Birch`, `A11y Cedar`,
+`A11y Maple`), so the user's shell and desktop entries were untouched. The
+runtime directory has to stay short: the control socket path must fit
+`SUN_LEN`.
+
+```
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+  --method org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled '<true>'
+/usr/bin/python3 tools/live/a11y-suite.py    # exits 0; log in /tmp/opencode
+```
+
+| ID | Criterion | Result |
+| --- | --- | --- |
+| A1 | Launcher detected by AT-SPI | Pass: application `hayu`, window `Hayu launcher` with role `frame` while the overlay is open |
+| A2 | Search field has a name, role and value | Pass: one node with role `entry` and name `Search applications`; `Text.GetText` returned `""` before typing, `A11y` after injecting `type:A11y`, and `A11y B` after appending `type: B` |
+| A3 | Results readable | Pass: one `list` named `Results`; one `list item` per filtered entry, named after the desktop entry; the three fixtures matched `A11y`, and appending ` B` left exactly `A11y Birch` |
+| A4 | Active selection readable | Pass: the initial row carried `selected=true`; `Down` moved it from `A11y Birch` to `A11y Cedar` |
+| A5 | Close and reopen stay consistent | Pass: after close the window node remained but `showing=false` with no `entry` or `list` children; reopening restored all three entries with an empty query value and the first row selected |
+| A6 | The check does not disturb the session | Pass: only the shell started by the suite was quit, `IsEnabled` was restored to `false`, and the temporary runtime and config directories were removed |
+
+- The check drives plain `wl_keyboard` input, which needs no bound input
+  method; it does not exercise the text-input path, and the IME I4 exception
+  above stays open.
+- Limits: no screen reader was installed, so announcement order, focus events,
+  braille output and interruption behaviour were not tested, and T-17 remains
+  unrun. The tree is read-only: the action handler ignores requests, so
+  activating a result from a screen reader does nothing. Caret and selection
+  ranges are absent, IME preedit is not exposed at all, and there are no
+  bounds/geometry nodes. Only the launcher is covered; the bar has no semantic
+  tree. A closed launcher is a hidden frame node because AccessKit has no API
+  to remove a tree root. All filtered results are published, with no row cap
+  or scroll position. One output at scale 1 was used, and `IsEnabled` was set
+  by the check rather than by a client.
+
 ### Terminal fallback arguments (November 5, 2026)
 
 The fallback list is not one invocation: each emulator has its own way to run a
