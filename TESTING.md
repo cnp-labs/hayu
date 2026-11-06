@@ -93,7 +93,7 @@ Hyprland uses the Lua config provider, where `hyprctl keyword` answers
   again.
 
 ### Config reload (November 6, 2026)
-Run at commit `2ff205e` on the same session (Hyprland 0.57.0, one 1366×768
+Run at commit `310a7c7` on the same session (Hyprland 0.57.0, one 1366×768
 output at scale 1). A real bar was started from a temporary `XDG_CONFIG_HOME`,
 the config file was rewritten between steps, and each `hayu reload` went through
 the control socket. Geometry came from `hyprctl layers -j`; nothing here was
@@ -109,18 +109,27 @@ inferred from the config file alone.
 | `launcher.enabled=false` makes `launcher toggle` and `launcher open` exit 1 | Live pass |
 | Reloading `enabled=false` while the overlay is open closes it | Live pass |
 | Re-enabling maps the launcher again; `quit` exits 0 | Live pass |
-| A config that only changes `bar.outputs` still exits 0 and prints `restart required for: bar.outputs` | Live pass |
 | An applied-only reload prints no notice | Live pass |
+| `bar.outputs = ["NOPE-1"]` applies without a restart, prints no notice, and removes the bar | Live pass |
+| The launcher still opens with no bar, because it falls back to the output list | Live pass |
+| `bar.enabled=false` applies without a restart and removes the bar | Live pass |
+| The launcher still opens with the bar disabled | Live pass |
+| Re-enabling the bar maps it again at the configured height | Live pass |
+| A named filter moves the bar onto a matching hotplugged headless output | Live pass |
+| Removing that output removes its bar; restoring `*` maps the bar on the real output | Live pass |
+| A widget-list change still exits 0 and prints `restart required for: bar.left` | Live pass |
 | Theme/accent and clock-format change | Applied, no pixel diff |
-| `bar.outputs` or a widget-list change | Needs restart |
 
-- Method: `tools/live/reload-suite.sh` (28 checks at `d3781f7`) writes small
+- Method: `tools/live/reload-suite.sh` (41 checks at `310a7c7`) writes small
   config files with `printf`, calls `hayu reload` between steps, and reads
   `h`/`y` of the `hayu` layer plus the `hayu-launcher` layer count. It starts
-  its own shell against a temporary `XDG_CONFIG_HOME`.
-- Limits: one output, integral scale, no screenshot tool, so a theme or clock
-  change is only known to have been applied to the state, not confirmed on
-  screen. Widget lists and output mapping were not expected to change.
+  its own shell against a temporary `XDG_CONFIG_HOME`, creates a headless
+  output for the filter check through `hyprctl`, and removes every headless
+  output it made on exit.
+- Limits: one real output and integral scale; the filter check uses a
+  temporary headless output, not a second monitor. No screenshot tool, so a
+  theme or clock change is only known to have been applied to the state, not
+  confirmed on screen. Widget lists still need a restart.
 - Unit tests cannot reach this path without a Wayland session; the IPC parser
   change (`reload`) is pinned by `parses_and_serializes_requests`.
 

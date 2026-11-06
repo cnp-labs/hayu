@@ -32,11 +32,11 @@ only `$XDG_CONFIG_HOME/hayu/config.toml` (no `--config` flag yet). Client
 commands talk to `$XDG_RUNTIME_DIR/hayu/<session-id>/control.sock`; without a
 running shell they exit non-zero with a readable message.
 
-`hayu reload` applies the theme, clock format, bar height/position and
-`launcher.enabled` only; `bar.outputs`, the widget lists and every unread
-section still need a restart, and a change to one of them prints
-`restart required for: ...` while still exiting 0. An invalid file exits
-non-zero and leaves the running state untouched.
+`hayu reload` applies the theme, clock format, bar height/position,
+`bar.enabled`, `bar.outputs` and `launcher.enabled`; the widget lists and
+every unread section still need a restart, and a change to one of them
+prints `restart required for: ...` while still exiting 0. An invalid file
+exits non-zero and leaves the running state untouched.
 
 ## Do not overclaim
 
