@@ -133,6 +133,20 @@ inferred from the config file alone.
 - Unit tests cannot reach this path without a Wayland session; the IPC parser
   change (`reload`) is pinned by `parses_and_serializes_requests`.
 
+### Idle redraw check (November 6, 2026)
+Run at `72ffbcc` on the same session, with one 32px bar and no input. Two
+independent logs covered 40 seconds from 14:19:07: `WAYLAND_DEBUG=1` counted
+`wl_surface.commit` calls, and a separate client read the Hyprland event socket.
+The bar committed 10 times; every commit sat in the same burst as a Hyprland
+event (`windowtitle`/`activewindow` at 0.0 s, 12.44 s, 18.21 s and 30.92 s,
+plus the startup draws before the window). No commit happened in any gap
+between events, so there is no redraw timer: the minute tick is the only
+scheduled draw, and the window ended before the next minute boundary, so that
+path is not covered by this run. The events came from ordinary desktop activity
+(a window title and a workspace change), not from the bar.
+- Limits: one output, integral scale, a busy session; the check proves there
+  was no periodic redraw in this window, not that every future idle period
+  stays silent.
 ### Terminal fallback arguments (November 5, 2026)
 
 The fallback list is not one invocation: each emulator has its own way to run a
