@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=Hayu Failing Launch
+Exec=/nonexistent/hayu-live-fail

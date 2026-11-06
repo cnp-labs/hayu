@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=Hayu Test Three
+Exec=/usr/bin/touch /tmp/hayu-live/three

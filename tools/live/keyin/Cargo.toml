@@ -1,0 +1,12 @@
+[package]
+name = "keyin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Throwaway zwp_virtual_keyboard_v1 injector for Hayu live checks"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = { version = "0.8", default-features = false }

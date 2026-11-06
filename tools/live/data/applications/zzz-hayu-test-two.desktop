@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=Hayu Test Two
+Exec=/usr/bin/touch /tmp/hayu-live/two
