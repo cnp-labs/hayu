@@ -315,17 +315,18 @@ impl State {
         let (response, quit) = match command {
             Ok(command) => {
                 let result = match command {
-                    IpcCommand::LauncherToggle => self.toggle_launcher(),
-                    IpcCommand::LauncherOpen => self.open_launcher(),
+                    IpcCommand::LauncherToggle => self.toggle_launcher().map(|()| None),
+                    IpcCommand::LauncherOpen => self.open_launcher().map(|()| None),
                     IpcCommand::LauncherClose => {
                         self.close_launcher();
-                        Ok(())
+                        Ok(None)
                     }
-                    IpcCommand::Quit => Ok(()),
+                    IpcCommand::Quit => Ok(None),
                     IpcCommand::Reload => self.reload_config(),
                 };
                 match result {
-                    Ok(()) => (ipc::Response::ok(id), command == IpcCommand::Quit),
+                    Ok(Some(notice)) => (ipc::Response::ok_with_notice(id, notice), false),
+                    Ok(None) => (ipc::Response::ok(id), command == IpcCommand::Quit),
                     Err(error) => (ipc::Response::error(id, error), false),
                 }
             }
@@ -341,13 +342,14 @@ impl State {
 
     /// Re-read the config file. A parse or validation error keeps the running
     /// state untouched, so a bad edit cannot take the shell down.
-    fn reload_config(&mut self) -> Result<(), String> {
+    fn reload_config(&mut self) -> Result<Option<String>, String> {
         let path = config::default_path();
         let cfg = if path.exists() {
             config::load(&path).map_err(|error| format!("{}: {error}", path.display()))?
         } else {
             config::Config::default()
         };
+        let restart = config::restart_required(&self.cfg, &cfg);
         let theme = Theme::from_config(&cfg.appearance.mode, &cfg.appearance.accent);
         self.cfg = cfg;
         self.theme = theme;
@@ -357,7 +359,8 @@ impl State {
         }
         self.apply_bar_geometry();
         self.draw_all();
-        Ok(())
+        Ok((!restart.is_empty())
+            .then(|| format!("restart required for: {}", restart.join(", "))))
     }
 
     /// Height and edge are layer-shell state, so a change needs a new configure

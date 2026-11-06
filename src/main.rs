@@ -50,7 +50,11 @@ fn check(path: Option<PathBuf>) -> ExitCode {
 
 fn ipc_command(command: &str) -> ExitCode {
     match ipc::send_command(command) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(Some(notice)) => {
+            eprintln!("hayu: {notice}");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("hayu: {error}");
             ExitCode::FAILURE

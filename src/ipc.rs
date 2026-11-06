@@ -60,6 +60,9 @@ pub struct Response {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Applied, but the running shell cannot pick this up; the CLI prints it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 impl Response {
@@ -68,6 +71,15 @@ impl Response {
             id,
             ok: true,
             error: None,
+            notice: None,
+        }
+    }
+    pub fn ok_with_notice(id: u64, notice: String) -> Self {
+        Self {
+            id,
+            ok: true,
+            error: None,
+            notice: Some(notice),
         }
     }
 
@@ -76,6 +88,7 @@ impl Response {
             id,
             ok: false,
             error: Some(error.into()),
+            notice: None,
         }
     }
 }
@@ -308,7 +321,7 @@ pub fn write_response(stream: &mut UnixStream, response: &Response) -> Result<()
         .map_err(|e| format!("cannot write control response: {e}"))
 }
 
-pub fn send_command(command: &str) -> Result<(), String> {
+pub fn send_command(command: &str) -> Result<Option<String>, String> {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let path = socket_path()?;
     let mut stream = UnixStream::connect(&path).map_err(|error| {
@@ -346,7 +359,7 @@ pub fn send_command(command: &str) -> Result<(), String> {
         ));
     }
     if response.ok {
-        Ok(())
+        Ok(response.notice)
     } else {
         Err(response
             .error

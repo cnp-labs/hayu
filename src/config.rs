@@ -14,7 +14,7 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub schema_version: Option<i64>,
@@ -32,7 +32,7 @@ pub struct Config {
     pub clipboard: Clipboard,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
     pub mode: String,
@@ -41,7 +41,7 @@ pub struct Appearance {
     pub reduce_motion: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Bar {
     pub enabled: bool,
@@ -53,26 +53,26 @@ pub struct Bar {
     pub right: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Clock {
     pub format: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Launcher {
     pub enabled: bool,
     pub favorites: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Tray {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Notifications {
     pub enabled: bool,
@@ -80,7 +80,7 @@ pub struct Notifications {
     pub history_limit: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct ControlCenter {
     pub audio: bool,
@@ -89,19 +89,19 @@ pub struct ControlCenter {
     pub battery: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Media {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Osd {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Wallpaper {
     pub enabled: bool,
@@ -110,14 +110,14 @@ pub struct Wallpaper {
     pub outputs: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Dock {
     pub enabled: bool,
     pub pinned: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Clipboard {
     pub enabled: bool,
@@ -305,6 +305,45 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     parse(&text)
 }
 
+/// Keys that a reload cannot apply to the running shell. `hayu reload` reports
+/// them so a user does not assume a full restart-free change.
+pub fn restart_required(old: &Config, new: &Config) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+    let checks = [
+        (
+            old.appearance.animations != new.appearance.animations,
+            "appearance.animations",
+        ),
+        (
+            old.appearance.reduce_motion != new.appearance.reduce_motion,
+            "appearance.reduce_motion",
+        ),
+        (old.bar.enabled != new.bar.enabled, "bar.enabled"),
+        (old.bar.outputs != new.bar.outputs, "bar.outputs"),
+        (old.bar.left != new.bar.left, "bar.left"),
+        (old.bar.center != new.bar.center, "bar.center"),
+        (old.bar.right != new.bar.right, "bar.right"),
+        (
+            old.launcher.favorites != new.launcher.favorites,
+            "launcher.favorites",
+        ),
+        (old.tray != new.tray, "tray"),
+        (old.notifications != new.notifications, "notifications"),
+        (old.control_center != new.control_center, "control_center"),
+        (old.media != new.media, "media"),
+        (old.osd != new.osd, "osd"),
+        (old.wallpaper != new.wallpaper, "wallpaper"),
+        (old.dock != new.dock, "dock"),
+        (old.clipboard != new.clipboard, "clipboard"),
+    ];
+    for (changed, name) in checks {
+        if changed {
+            keys.push(name);
+        }
+    }
+    keys
+}
+
 pub fn parse(text: &str) -> Result<Config, ConfigError> {
     if text.len() > 1024 * 1024 {
         return Err(ConfigError("config is larger than the 1 MiB limit".into()));
@@ -462,6 +501,34 @@ mod tests {
         assert!(err.to_string().contains("bar.height"), "{err}");
     }
 
+    #[test]
+    fn restart_required_lists_only_unapplied_keys() {
+        let base = Config::default();
+        let applied = parse(
+            "schema_version = 1\n[appearance]\nmode = \"light\"\naccent = \"#ffffff\"\n[bar]\nheight = 40\nposition = \"bottom\"\n[clock]\nformat = \"%H\"\n[launcher]\nenabled = false\n",
+        )
+        .unwrap();
+        assert!(restart_required(&base, &applied).is_empty());
+        let restart = parse(
+            "schema_version = 1\n[bar]\nenabled = false\noutputs = [\"DP-1\"]\nleft = [\"clock\"]\n[launcher]\nfavorites = [\"foot.desktop\"]\n[tray]\nenabled = false\n",
+        )
+        .unwrap();
+        assert_eq!(
+            restart_required(&base, &restart),
+            [
+                "bar.enabled",
+                "bar.outputs",
+                "bar.left",
+                "launcher.favorites",
+                "tray"
+            ]
+        );
+        assert_eq!(
+            restart_required(&base, &base),
+            Vec::<&'static str>::new(),
+            "an identical config needs no restart"
+        );
+    }
     #[test]
     fn future_schema_rejected() {
         let err = parse("schema_version = 2\n").unwrap_err();
