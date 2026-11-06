@@ -1,6 +1,6 @@
 # Testing strategy and release gate
 
-Status: plan with a partial M0 suite. `cargo test` runs 40 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, scale 2, two outputs and config reload were exercised live (see below); IME, screen-reader, soak, fractional scale and mixed per-output scales have not been run.
+Status: plan with a partial M0 suite. `cargo test` runs 41 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, scale 2, two outputs and config reload were exercised live (see below); the launcher and reload harnesses are checked in under `tools/live/`; IME, screen-reader, soak, fractional scale and mixed per-output scales have not been run.
 
 ## Testing layers
 
@@ -12,7 +12,9 @@ Status: plan with a partial M0 suite. `cargo test` runs 40 unit tests covering c
 
 ## Launcher live input check (November 5, 2026)
 
-Run at commit `10fbb4c` on the target machine (Hyprland 0.57.0, one output, scale 1). Keys were sent as real Wayland input through a throwaway `zwp_virtual_keyboard_v1` client; the shell was observed through `HAYU_DEBUG_KEYS=1` and `HAYU_DEBUG_SCAN=1` traces plus `hyprctl layers -j`, because no screenshot tool is installed. The driver is not in the repository.
+Run at commit `10fbb4c` on the target machine (Hyprland 0.57.0, one output, scale 1). Keys were sent as real Wayland input through a throwaway `zwp_virtual_keyboard_v1` client; the shell was observed through `HAYU_DEBUG_KEYS=1` and `HAYU_DEBUG_SCAN=1` traces plus `hyprctl layers -j`, because no screenshot tool is installed. That run used a throwaway build of the
+same approach; the harness now lives in `tools/live/` and the suite was re-run
+at `d3781f7` (15 checks, all pass).
 
 | Check | Result |
 | --- | --- |
@@ -33,10 +35,11 @@ Unit tests still own the parts the live run cannot isolate: Exec tokenization an
 
 ### Method and limits
 
-- Harness: a throwaway client bound `zwp_virtual_keyboard_v1` on the Hyprland
-  seat, uploaded a `us` keymap built with xkbcommon, and sent press/release
-  pairs 20 ms apart (one held press for the repeat check). It lives outside the
-  repository; no package was installed to run it.
+- Harness: `tools/live/keyin`, a small client that binds
+  `zwp_virtual_keyboard_v1` on the Hyprland seat, uploads an xkb keymap and
+  sends press/release pairs 20 ms apart (one held press for the repeat check).
+  `tools/live/input-suite.sh` drives it and reads the trace. Both are in the
+  repository now; see `tools/live/README.md` for the commands and its limits.
 - Observation: `HAYU_DEBUG_KEYS=1` printed keysym, UTF-8, query, selection,
   result count, first names and per-frame draw time; `HAYU_DEBUG_SCAN=1`
   printed the scan duration; `hyprctl layers -j` confirmed whether the overlay
@@ -106,12 +109,15 @@ inferred from the config file alone.
 | `launcher.enabled=false` makes `launcher toggle` and `launcher open` exit 1 | Live pass |
 | Reloading `enabled=false` while the overlay is open closes it | Live pass |
 | Re-enabling maps the launcher again; `quit` exits 0 | Live pass |
+| A config that only changes `bar.outputs` still exits 0 and prints `restart required for: bar.outputs` | Live pass |
+| An applied-only reload prints no notice | Live pass |
 | Theme/accent and clock-format change | Applied, no pixel diff |
 | `bar.outputs` or a widget-list change | Needs restart |
 
-- Method: the driver is `/tmp/opencode/reload-live.sh` (not in the repository);
-  it writes small config files with `printf`, calls `hayu reload` between steps,
-  and reads `h`/`y` of the `hayu` layer plus the `hayu-launcher` layer count.
+- Method: `tools/live/reload-suite.sh` (28 checks at `d3781f7`) writes small
+  config files with `printf`, calls `hayu reload` between steps, and reads
+  `h`/`y` of the `hayu` layer plus the `hayu-launcher` layer count. It starts
+  its own shell against a temporary `XDG_CONFIG_HOME`.
 - Limits: one output, integral scale, no screenshot tool, so a theme or clock
   change is only known to have been applied to the state, not confirmed on
   screen. Widget lists and output mapping were not expected to change.

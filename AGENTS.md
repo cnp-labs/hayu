@@ -12,13 +12,16 @@ both surfaces still draw through tiny-skia until M1.
 
 ```
 cargo build --release
-cargo test                                 # 40 unit tests
+cargo test                                 # 41 unit tests
 ./target/release/hayu doctor               # works without a shell running
 ./target/release/hayu config check examples/config.toml
 ./target/release/hayu run                  # needs a live Hyprland session
 ./target/release/hayu launcher toggle      # needs `hayu run`; also open|close
 ./target/release/hayu quit                 # stops the running shell
 ./target/release/hayu reload               # re-reads config; needs `hayu run`
+cargo build --release --offline --manifest-path tools/live/keyin/Cargo.toml
+tools/live/input-suite.sh                  # live launcher suite; needs Hyprland
+tools/live/reload-suite.sh                 # live reload suite; needs Hyprland
 ./target/release/hayu-gpu-spike --backend gl --mode offscreen --frames 300 --json
 cargo build --release --features wgpu      # opt-in backend for the spike only
 ```
@@ -30,8 +33,10 @@ commands talk to `$XDG_RUNTIME_DIR/hayu/<session-id>/control.sock`; without a
 running shell they exit non-zero with a readable message.
 
 `hayu reload` applies the theme, clock format, bar height/position and
-`launcher.enabled` only; `bar.outputs` and the widget lists still need a
-restart. An invalid file exits non-zero and leaves the running state untouched.
+`launcher.enabled` only; `bar.outputs`, the widget lists and every unread
+section still need a restart, and a change to one of them prints
+`restart required for: ...` while still exiting 0. An invalid file exits
+non-zero and leaves the running state untouched.
 
 ## Do not overclaim
 
