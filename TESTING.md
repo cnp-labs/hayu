@@ -134,19 +134,37 @@ inferred from the config file alone.
   change (`reload`) is pinned by `parses_and_serializes_requests`.
 
 ### Idle redraw check (November 6, 2026)
-Run at `72ffbcc` on the same session, with one 32px bar and no input. Two
-independent logs covered 40 seconds from 14:19:07: `WAYLAND_DEBUG=1` counted
-`wl_surface.commit` calls, and a separate client read the Hyprland event socket.
-The bar committed 10 times; every commit sat in the same burst as a Hyprland
-event (`windowtitle`/`activewindow` at 0.0 s, 12.44 s, 18.21 s and 30.92 s,
-plus the startup draws before the window). No commit happened in any gap
-between events, so there is no redraw timer: the minute tick is the only
-scheduled draw, and the window ended before the next minute boundary, so that
-path is not covered by this run. The events came from ordinary desktop activity
-(a window title and a workspace change), not from the bar.
-- Limits: one output, integral scale, a busy session; the check proves there
-  was no periodic redraw in this window, not that every future idle period
-  stays silent.
+Two runs on the same session, one 32px top bar, `%H:%M` clock, no input. Each
+run used two independent logs: `WAYLAND_DEBUG=1` counted `wl_surface.commit`
+calls, and a separate client read the Hyprland event socket with a timestamp per
+line.
+
+Run 1 at `72ffbcc` covered 40 seconds from 14:19:07. The bar committed 10 times;
+every commit sat in the same burst as a Hyprland event (`windowtitle`/
+`activewindow` at 0.0 s, 12.44 s, 18.21 s and 30.92 s, plus the startup draws
+before the window). No commit happened in any gap between events. That window
+ended before the next minute boundary, so it did not cover the tick.
+
+Run 2 at `19b6f8b` covered 80 seconds, 14:50:49 to 14:52:09, and crossed two
+minute boundaries. The bar committed 19 times: 17 in the startup burst at
+14:50:46-49 (each within ~1 ms of `openlayer`, `activewindow`, `workspace`,
+`createworkspace` or `destroyworkspace`), and 2 at 14:51:00.021 and
+14:52:00.022. Those two are 21 ms and 22 ms after the minute changed, and no
+Hyprland event was logged between 14:50:49.06 and 14:52:09.6, so they can only
+be the clock tick.
+
+| Check | Result |
+| --- | --- |
+| Commits outside a Hyprland event burst (run 2) | only the two minute ticks |
+| Exactly one draw per minute boundary | Live pass: commits at :00.021 and :00.022, 60.0 s apart, nothing between |
+| Idle CPU over the 80 s window | 0 ticks in `/proc/<pid>/stat`, under 0.02% of one logical core; 6 voluntary context switches |
+| PSS while idle and closed | 7.0 MiB |
+| Redraw after a title or workspace change | one commit ~1 ms after the event burst |
+
+- Limits: one output, integral scale, a busy session; the runs prove there was
+  no periodic redraw and that the tick fires once per minute, not that every
+  future idle period stays silent. Only the bar was measured; the bar and
+  launcher were closed for the CPU and PSS samples.
 ### Terminal fallback arguments (November 5, 2026)
 
 The fallback list is not one invocation: each emulator has its own way to run a
