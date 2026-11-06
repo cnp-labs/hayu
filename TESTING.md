@@ -1,6 +1,6 @@
 # Testing strategy and release gate
 
-Status: plan with a partial M0 suite. `cargo test` runs 41 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, scale 2, two outputs and config reload were exercised live (see below); the launcher and reload harnesses are checked in under `tools/live/`; IME, screen-reader, soak, fractional scale and mixed per-output scales have not been run.
+Status: plan with a partial M0 suite. `cargo test` runs 43 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, IME, scale 2, two outputs and config reload were exercised live (see below); the launcher and reload harnesses are checked in under `tools/live/`, and the IME run used fcitx5 plus fcitx5-anthy. Screen-reader, soak, fractional scale and mixed per-output scales have not been run.
 
 ## Testing layers
 
@@ -29,7 +29,7 @@ at `d3781f7` (15 checks, all pass).
 | `Terminal=true` entry runs inside foot and closes the overlay | Live pass |
 | Failing `Exec` keeps the overlay open and reports the error | Live pass |
 | `hayu quit` exits 0 and the socket is removed | Live pass |
-| IME | Not tested |
+| IME | Live pass with one exception, see the fcitx5 section below |
 
 Unit tests still own the parts the live run cannot isolate: Exec tokenization and field-code rejection, desktop-ID deduplication, filter ordering, terminal resolution, socket framing and permissions, and key mapping.
 
@@ -53,9 +53,9 @@ Unit tests still own the parts the live run cannot isolate: Exec tokenization an
   frames including the cold first frame, and the CLI round trip measured around
   `hayu launcher toggle`.
 - Limits: one 1366×768 output at scale 1, 46 desktop entries, one session, one
-  idle sample; no fractional scale or IME. The CLI round trip ends when the
-  control socket answers, so surface-map latency is not isolated, and no GPU
-  metric was collected for the launcher.
+  idle sample and no fractional scale; IME is covered by its own section. The
+  CLI round trip ends when the control socket answers, so surface-map latency
+  is not isolated, and no GPU metric was collected for the launcher.
 
 ### Scale 2, two outputs and a runtime keymap switch (November 5, 2026)
 
@@ -75,7 +75,7 @@ Hyprland uses the Lua config provider, where `hyprctl keyword` answers
 | Removing `HEADLESS-1` while the launcher is open: shell survives, layer disappears | Live pass |
 | Next open lands on the remaining output and accepts keys | Live pass |
 | Keymap `us`→`de`: evdev keycode 44 yields `z` before and `y` after, no restart | Live pass |
-| Mixed per-output scales, fractional scale, IME | Not tested |
+| Mixed per-output scales, fractional scale | Not tested (IME has its own section) |
 
 - Scale: the launcher read the new scale from the output info and drew a
   1120×840 buffer for its 560×420 logical surface; the exact pixels are covered
@@ -165,6 +165,43 @@ be the clock tick.
   no periodic redraw and that the tick fires once per minute, not that every
   future idle period stays silent. Only the bar was measured; the bar and
   launcher were closed for the CPU and PSS samples.
+### Text input with fcitx5 and anthy (November 6, 2026)
+Run at `4de4112` on the same session (Hyprland 0.57.0, one 1366×768 output at
+scale 1) with `fcitx5 5.1.23` and `fcitx5-anthy 5.1.11`. Anthy was picked
+because it composes visible Japanese from Latin keys, so a wrong commit is
+obvious without a candidate UI. The input method ran with `fcitx5 --replace -d`
+against a temporary `XDG_CONFIG_HOME` holding both `hayu/config.toml` and an
+`fcitx5/profile` with one anthy group, and `fcitx5-remote -o` activated it;
+`fcitx5-remote -n` reported `anthy`. Keys came from `tools/live/keyin` and the
+launcher was driven through the control socket. `HAYU_DEBUG_IME=1` and
+`WAYLAND_DEBUG=1` recorded event kinds and lengths, and `HAYU_DEBUG_KEYS=1`
+printed the query only for the checks that need it.
+
+| ID | Criterion | Result |
+| --- | --- | --- |
+| I1 | Bound once on the launcher seat | Pass: one `zwp_text_input_manager_v3` bind and one `get_text_input` for the seat; no text-input object is created for a bar |
+| I2 | Inline preedit, no early filtering | Pass: the preedit went `n` → `に` → `にh` → `にほ` → `にほn` while `query_len` stayed 0 |
+| I3 | Commit inserts once and launches | Pass: Space turned the preedit into `日本`, Return sent exactly one `commit_string("日本")`, `query_len` became 6 and surrounding text `日本` 6/6; the next Return launched the test entry and closed the overlay |
+| I4 | Cancel leaves the launcher usable | **Exception**: the first Escape cleared the preedit (`key -> Changed`, `preedit=0`) and left the overlay mapped, but the second Escape never reached the client — it produced no `wl_keyboard.key` at all — and only the third closed it. With no composition, one Escape still closes normally |
+| I5 | Editing stays inside the protocol | Pass: BackSpace during the preedit took `にほn` to `にほ`; `query_len` stayed 0 |
+| I6 | Surrounding text stays correct | Pass: after the commit the client sent `日本` 6/6; BackSpace then removed one character and sent `日` 3/3, leaving one matching entry |
+| I7 | Close and reopen reset the field | Pass: closing with a preedit logged `ime disabled`; reopening logged `ime enabled` and `set_surrounding_text("", 0, 0)`, and the next preedit started from `f`, not from the old text |
+| I8 | Missing IME falls back cleanly | Pass: with fcitx5 stopped, `tools/live/input-suite.sh` passed 15/15 and reported no protocol error |
+| I9 | Teardown is clean | Pass: `hayu quit` with a preedit exited 0 and sent `disable` + `commit` before destroying the layers; reloading `launcher.enabled=false` exited 0, closed the overlay and logged `ime disabled`; removing the focused headless output with a preedit left the shell alive, removed the launcher layer and logged `ime disabled` |
+| I10 | Text is not logged by default | Pass: with `HAYU_DEBUG_IME=1` and no `HAYU_DEBUG_KEYS=1`, the trace held only counts and lengths, and a search for `にほ`, `日本` and `nihon` in the log found nothing |
+
+- No double insert: while the input method composed, no `wl_keyboard.key`
+  reached the surface, so the keysym path never inserted the same letters a
+  second time; the committed text appeared once in the query.
+- The I4 exception comes from fcitx5-anthy keeping its own composition after
+  the client drops the preedit; the protocol has no cancel request, so the
+  client cannot clear it. It is recorded as an open interaction, not as
+  working behaviour.
+- Limits: no screenshot tool, so preedit rendering and the input method's own
+  candidate popup were not inspected pixel by pixel; I1-I8 used the real output
+  only; I9's output removal used a headless output, not a cable; preedit,
+  commit and delete were the only text-input events exercised.
+
 ### Terminal fallback arguments (November 5, 2026)
 
 The fallback list is not one invocation: each emulator has its own way to run a

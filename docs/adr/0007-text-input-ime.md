@@ -1,6 +1,8 @@
 # ADR-0007 — Text input and IME through text-input-v3
-Date: November 6, 2026. Status: **accepted for implementation**; the acceptance
-criteria below are not met until they are run with a real input method.
+Date: November 6, 2026. Status: **accepted and implemented** in `4de4112`.
+I1-I10 were run with fcitx5 and fcitx5-anthy (results in TESTING.md); I4 is the
+only criterion that did not pass, because the input method consumes the second
+Escape after a cancelled composition.
 
 ## Context
 The launcher is a layer-shell surface with an exclusive keyboard grab while it
@@ -101,8 +103,10 @@ These criteria are the M1 exit evidence. They are run with
 reference machine at the time of this ADR), started with `fcitx5 --replace -d`
 and toggled with `fcitx5-remote -o`. Anthy is chosen because it composes
 visible Japanese text from Latin keys, so a failure is obvious without relying
-on a candidate UI. Until the table exists in TESTING.md with a commit and date,
-no IME support may be claimed.
+on a candidate UI. The table exists in TESTING.md at `4de4112`. I4 stays open, so
+this ADR supports a launcher IME claim only with that exception stated: after a
+cancelled composition, one Escape is consumed by the input method before the
+next one closes the overlay.
 
 | ID | Criterion | Method |
 | --- | --- | --- |
