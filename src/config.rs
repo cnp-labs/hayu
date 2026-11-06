@@ -318,8 +318,6 @@ pub fn restart_required(old: &Config, new: &Config) -> Vec<&'static str> {
             old.appearance.reduce_motion != new.appearance.reduce_motion,
             "appearance.reduce_motion",
         ),
-        (old.bar.enabled != new.bar.enabled, "bar.enabled"),
-        (old.bar.outputs != new.bar.outputs, "bar.outputs"),
         (old.bar.left != new.bar.left, "bar.left"),
         (old.bar.center != new.bar.center, "bar.center"),
         (old.bar.right != new.bar.right, "bar.right"),
@@ -515,13 +513,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             restart_required(&base, &restart),
-            [
-                "bar.enabled",
-                "bar.outputs",
-                "bar.left",
-                "launcher.favorites",
-                "tray"
-            ]
+            ["bar.left", "launcher.favorites", "tray"],
+            "bar.enabled and bar.outputs are applied by sync_bars"
         );
         assert_eq!(
             restart_required(&base, &base),

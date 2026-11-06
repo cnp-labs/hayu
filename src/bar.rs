@@ -357,6 +357,7 @@ impl State {
         if !self.cfg.launcher.enabled && self.launcher.is_open() {
             self.close_launcher();
         }
+        self.sync_bars();
         self.apply_bar_geometry();
         self.draw_all();
         Ok((!restart.is_empty())
@@ -437,6 +438,56 @@ impl State {
         self.launcher.close();
     }
 
+    /// Whether the config asks for a bar on this output name. `*` matches all.
+    fn bar_wanted(&self, name: Option<&str>) -> bool {
+        if !self.cfg.bar.enabled {
+            return false;
+        }
+        self.cfg
+            .bar
+            .outputs
+            .iter()
+            .any(|pattern| pattern == "*" || Some(pattern.as_str()) == name)
+    }
+
+    /// Add bars for wanted outputs and destroy bars the config no longer asks
+    /// for. Hotplug goes through `new_output`; this is for reload.
+    fn sync_bars(&mut self) {
+        let outputs: Vec<(wl_output::WlOutput, Option<String>)> = self
+            .output_state
+            .outputs()
+            .map(|output| {
+                let name = self.output_state.info(&output).and_then(|info| info.name);
+                (output, name)
+            })
+            .collect();
+        let mut keep = std::collections::HashSet::new();
+        for (output, name) in outputs {
+            let id = output.id().protocol_id();
+            if !self.bar_wanted(name.as_deref()) {
+                continue;
+            }
+            keep.insert(id);
+            if !self.bars.contains_key(&id) {
+                self.create_bar(output);
+            }
+        }
+        let stale: Vec<u32> = self
+            .bars
+            .keys()
+            .copied()
+            .filter(|key| !keep.contains(key))
+            .collect();
+        for key in stale {
+            if let Some(bar) = self.bars.remove(&key) {
+                // The layer role must be destroyed before its surface.
+                let surface = bar.layer.wl_surface().clone();
+                drop(bar);
+                surface.destroy();
+            }
+        }
+    }
+
     fn launcher_output(&self) -> Option<wl_output::WlOutput> {
         let focused = self.snapshot.as_ref().and_then(|snapshot| {
             snapshot
@@ -458,7 +509,11 @@ impl State {
                 }
             }
         }
-        self.bars.values().next().map(|bar| bar.output.clone())
+        self.bars
+            .values()
+            .next()
+            .map(|bar| bar.output.clone())
+            .or_else(|| self.output_state.outputs().next())
     }
 
     fn handle_launcher_key(&mut self, event: KeyEvent) {
@@ -736,7 +791,10 @@ impl OutputHandler for State {
         _qh: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
-        self.create_bar(output);
+        let name = self.output_state.info(&output).and_then(|info| info.name);
+        if self.bar_wanted(name.as_deref()) {
+            self.create_bar(output);
+        }
     }
 
     fn update_output(
@@ -753,6 +811,10 @@ impl OutputHandler for State {
             }
             if let Some(bar) = self.bars.get_mut(&output.id().protocol_id()) {
                 bar.scale = info.scale_factor.max(1);
+            } else if self.bar_wanted(info.name.as_deref()) {
+                // `new_output` can run before the name is known, so a filtered
+                // bar may only become eligible here.
+                self.create_bar(output.clone());
             }
         }
         self.draw_all();
