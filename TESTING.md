@@ -282,16 +282,41 @@ tools/live/reload-suite.sh                   # 41 checks
 | Reference pixels | Pass: the launcher test rasterizes the same frame at scale 2 and finds the accent colour |
 | Protocol health | Pass: no protocol error in either live log; no `hayu run` left behind |
 
-- Limits: there is no screenshot or screencopy tool on this machine, so the GL
-  output was never compared pixel for pixel with the CPU reference, and nothing
-  was read back from the EGL surface. Correctness rests on the shared frame
-  data, the rasterizer test, and the live suites proving the elements react and
-  the surfaces stay up. One output at integral scale was used; fractional and
-  mixed scales remain untested.
-- The idle redraw evidence above counted `wl_surface.commit` while the shell
-  still used `wl_shm`. Each frame is now one commit from `swap_buffers`, so the
-  same counting method applies, but the idle runs were not repeated after this
-  change.
+- Limits of that run: no screenshot tool was used, so the check rested on the
+  shared frame data, the rasterizer test, and the live suites. The readback
+  section below inspects the renderer's own output; it does not cover the
+  composited desktop.
+- `cargo test` covers the frame/atlas code with the system font database; on a
+  machine without fonts the text assertions are skipped the same way the old
+  render tests were.
+### Visual and idle check on the GL renderer (November 7, 2026)
+Run at `729ba82` on Hyprland 0.57.1 (session restarted since the last entry),
+with two active outputs at once: a 1366×768 output at scale 1 and a temporary
+`HEADLESS-1` at 1920×1080 scale 2. No screencopy client is installed, and a
+non-interactive `org.freedesktop.portal.Screenshot` request was refused with
+response code `2`, so the composited screen was never captured. Instead a
+temporary, uncommitted patch read the EGL back buffer with `glReadPixels`
+before `eglSwapBuffers` and wrote one PPM per render attempt; it was removed
+after the run. `magick` converted those files to PNG for inspection. This is
+the renderer's output before the swap, not a screenshot of the desktop. PPM has
+no alpha channel, so alpha in a later RGBA conversion is synthetic.
+```
+HAYU_DEBUG_DUMP=/tmp/.../frame ./target/release/hayu run   # temporary patch
+```
+| Check | Observed |
+| --- | --- |
+| Bar content, scale 1 (1366×32) | Workspace pills `1` (accent fill `#8AB4F8`, dark label) and `2` (foreground label), clock `14:44` centred, muted title `hayu — ARCHITECTURE.md`, one pixel divider absent as designed |
+| Colours | Sampled RGB exactly `(30,30,46)` background, `(138,180,248)` accent, `(205,214,244)` foreground, `(108,112,134)` muted; 875 pixels in the bar and 9813 in the launcher differ from those exact values, consistent with anti-aliased coverage. Framebuffer alpha was not measured: the PPM dropped it, and `alpha=255` after converting to RGBA came from the converter |
+| Launcher, scale 1 (560×420) | Query `hayu` with cursor, divider, five fixture rows, footer `Up/Down select   Enter launch   Esc close`; `Down` moved the highlight to row two: accent rect from x=10 to x=550, label and desktop id switched to the background colour |
+| Clipping and ellipsis | The over-long fixture rendered as `Hayu Extremely Long Application Nam…` with `org.example.very.long.desktop.id.for.cli…` right-aligned, both inside the 560 px frame; no glyph crossed the surface edge |
+| Scale 2 bar and launcher | Bar buffer 1920×64 for a 960×32 logical surface, launcher 1120×840 for 560×420: glyph metrics, pill, clock centring, divider and highlight all doubled; the images were inspected, not pixel-diffed |
+| Reload height and edge | Renderer buffers: scale-1 bar 1366×32 → 1366×40 → 1366×32, scale-2 bar 1920×64 → 1920×80 → 1920×64. HDMI y moved 0 → 728 (768−40) per `hyprctl layers`. On the reverse reload the scale-2 surface box still read 960×40 while the buffer was already back to 960×32 logical; no composited capture shows it catching up before the next minute tick |
+| No idle presents | A separate run with `WAYLAND_DEBUG=1` (local 14:59:35–15:02:03, 147 s; log timestamps are UTC) shows the bar surface `wl_surface#10` taking exactly 4 `attach` + `commit` pairs from `{mesa egl surface queue}`: 07:59:36.05 (startup), 08:00:00.02, 08:01:00.02 and 08:02:00.02 — one per minute boundary, nothing between. One earlier `commit` at 07:59:35.95 carried no buffer (the initial layer-surface commit). In the dump run that measured render attempts, 3 files in 126 s matched the same pattern |
+| Cleanup | `hayu quit` left no process, the AT-SPI `IsEnabled` stayed `false`, and `HEADLESS-1` was removed with the real output back at 1366×768 scale 1 |
+- What was not observed: the composited screen, so overlap with other layers, focus rings and cursor rendering were not checked; framebuffer alpha; any pixel comparison against `render::rasterize` (the images were inspected, not diffed); and fractional scale. Both integral scales ran at once on separate outputs, so that combination was exercised, but one output switching between scales was not.
+- The dump was a temporary local patch, not a shipped feature. It ran synchronously on the UI thread, stalling the render, and wrote the whole surface including the visible launcher query, so an opt-in dump of this kind is not a privacy-safe diagnostic. It was removed after the run rather than kept.
+- The idle evidence now counts `wl_surface.attach`/`commit` pairs emitted by Mesa's EGL surface queue, i.e. the buffer attaches that follow a successful `eglSwapBuffers` on the GL path. The earlier `wl_shm`-era count is superseded. It still counts published frames, not the compositor's own present timing.
+
 - `cargo test` covers the frame/atlas code with the system font database; on a
   machine without fonts the text assertions are skipped the same way the old
   render tests were.
