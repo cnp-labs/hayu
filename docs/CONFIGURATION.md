@@ -1,6 +1,6 @@
 # Configuration, state, and IPC
 
-Status: **schema v1 design**. `hayu config check` validates the schema today; only bar/clock/appearance keys affect a running process, and no other module exists yet. TOML is user-decided; the keys/defaults below are baseline proposals. Full example: [examples/config.toml](examples/config.toml).
+Status: **schema v1 design**. `hayu config check` validates the schema today; only bar/clock/appearance keys affect a running process, and no other module exists yet. TOML is user-decided; the keys/defaults below are baseline proposals. Full example: [examples/config.toml](../examples/config.toml).
 
 ## Locations and precedence
 

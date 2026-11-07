@@ -19,17 +19,17 @@ Hayu is a Rust-based Wayland desktop shell for Hyprland users, with an internal 
 
 | Document | Purpose |
 | --- | --- |
-| [PRD.md](PRD.md) | Users, requirements, acceptance criteria, and release criteria |
-| [SCOPE.md](SCOPE.md) | V1 boundaries and scope expansion rules |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Modules, lifecycle, events, rendering, data, and integrations |
-| [DESIGN.md](DESIGN.md) | Component system and UI interactions |
-| [COMPATIBILITY.md](COMPATIBILITY.md) | Protocols, services, and testing targets |
-| [CONFIGURATION.md](CONFIGURATION.md) | Configuration design and hot reload |
-| [PERFORMANCE.md](PERFORMANCE.md) | Budget hypotheses and benchmark methodology |
-| [ROADMAP.md](ROADMAP.md) | Milestones and exit criteria |
-| [TESTING.md](TESTING.md) | Testing strategy and acceptance matrix |
-| [DECISIONS.md](DECISIONS.md) | Decisions, assumptions, and open questions |
-| [SOURCES.md](SOURCES.md) | Technical references and inspiration |
+| [PRD.md](docs/PRD.md) | Users, requirements, acceptance criteria, and release criteria |
+| [SCOPE.md](docs/SCOPE.md) | V1 boundaries and scope expansion rules |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Modules, lifecycle, events, rendering, data, and integrations |
+| [DESIGN.md](docs/DESIGN.md) | Component system and UI interactions |
+| [COMPATIBILITY.md](docs/COMPATIBILITY.md) | Protocols, services, and testing targets |
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | Configuration design and hot reload |
+| [PERFORMANCE.md](docs/PERFORMANCE.md) | Budget hypotheses and benchmark methodology |
+| [ROADMAP.md](docs/ROADMAP.md) | Milestones and exit criteria |
+| [TESTING.md](docs/TESTING.md) | Testing strategy and acceptance matrix |
+| [DECISIONS.md](docs/DECISIONS.md) | Decisions, assumptions, and open questions |
+| [SOURCES.md](docs/SOURCES.md) | Technical references and inspiration |
 | [docs/adr/0001-custom-ui.md](docs/adr/0001-custom-ui.md) | Internal UI decision |
 | [docs/adr/0002-hyprland-first.md](docs/adr/0002-hyprland-first.md) | Initial compositor and distribution targets |
 | [docs/adr/0003-toml.md](docs/adr/0003-toml.md) | TOML configuration decision |
@@ -38,7 +38,7 @@ Hayu is a Rust-based Wayland desktop shell for Hyprland users, with an internal 
 
 ## Starting implementation
 
-Start with M0 in [ROADMAP.md](ROADMAP.md). The first deliverable is a prototype covering surfaces, text, input, and scaling in Hyprland; then implement modules incrementally until all V1 requirements are met. This stage does not require a marketplace or plugin runtime.
+Start with M0 in [ROADMAP.md](docs/ROADMAP.md). The first deliverable is a prototype covering surfaces, text, input, and scaling in Hyprland; then implement modules incrementally until all V1 requirements are met. This stage does not require a marketplace or plugin runtime.
 
 [examples/config.toml](examples/config.toml) is a **proposed schema example**: `hayu config check` validates it, but most keys describe modules that do not exist yet. All CLI names, IPC service names, module paths, and design tokens in these documents remain proposals until implementation stabilizes them. The M0 slice builds and runs in a Hyprland session:
 

@@ -10,7 +10,7 @@ the section at the end of this document.
 ADR-0004 left the renderer open between GLES/EGL and wgpu, with a CPU path used
 only to unblock prototyping. The M0 prototype now draws a 1366×32 layer-shell
 bar with tiny-skia over `wl_shm`; text comes from cosmic-text, and nothing has
-measured the GPU backends. O-01 in DECISIONS.md cannot stay open indefinitely,
+measured the GPU backends. O-01 in ../DECISIONS.md cannot stay open indefinitely,
 because text upload, scaling, and surface presentation differ enough between
 backends to change the UI architecture.
 
@@ -93,7 +93,7 @@ second distribution are not available, and the ADR must state that limitation.
 ## Consequences
 
 After results are appended, this ADR changes status to accepted or rejected with
-per-criterion evidence, DECISIONS.md O-01 is updated, and the losing backend is
+per-criterion evidence, ../DECISIONS.md O-01 is updated, and the losing backend is
 removed unless it is kept as a documented fallback. The CPU path is retained for
 tests regardless of the outcome.
 

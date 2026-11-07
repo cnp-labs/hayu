@@ -43,14 +43,14 @@ exits non-zero and leaves the running state untouched.
 ## Do not overclaim
 
 - Never write that a V1 capability is implemented, tested, benchmarked, or
-  supported. Only the bar, launcher slice, config validation, and `doctor` exist; TESTING.md and
-  PERFORMANCE.md record that no T-01–T-20 result and no V1 profile measurement
+  supported. Only the bar, launcher slice, config validation, and `doctor` exist; docs/TESTING.md and
+  docs/PERFORMANCE.md record that no T-01–T-20 result and no V1 profile measurement
   exists.
-- `DECISIONS.md` is the authority on status: **D-01..D-09 user-decided**,
+- `docs/DECISIONS.md` is the authority on status: **D-01..D-09 user-decided**,
   **A-01..A-09 proposals**, **O-02..O-08 open**; **O-01 is closed** by ADR-0006.
   Never promote a proposal or an open question to a fact, and do not reopen the
   renderer without new measured evidence.
-- Requirements are `HAYU-001..016` (PRD.md), tests `T-01..T-20` (TESTING.md).
+- Requirements are `HAYU-001..016` (docs/PRD.md), tests `T-01..T-20` (docs/TESTING.md).
   Reference these IDs instead of inventing numbering.
 - "First release" means full V1 at M6, never the M0 bar.
 - Foundational changes (UI foundation, config format, renderer, privacy/state
@@ -63,13 +63,13 @@ exits non-zero and leaves the running state untouched.
 
 Update all affected files in the same commit:
 
-- Config key added or changed → `CONFIGURATION.md` schema table and
+- Config key added or changed → `docs/CONFIGURATION.md` schema table and
   `examples/config.toml`; `src/config.rs` must keep rejecting unknown keys.
-- New runtime behavior → the relevant `ARCHITECTURE.md` rules, and
-  `DESIGN.md` if it is visible UI.
-- Capability or fallback → `COMPATIBILITY.md`; new measurable number →
-  `PERFORMANCE.md`, labelled a hypothesis unless actually measured.
-- Milestone progress → `ROADMAP.md`, and `DECISIONS.md` if a gate closes.
+- New runtime behavior → the relevant `docs/ARCHITECTURE.md` rules, and
+  `docs/DESIGN.md` if it is visible UI.
+- Capability or fallback → `docs/COMPATIBILITY.md`; new measurable number →
+  `docs/PERFORMANCE.md`, labelled a hypothesis unless actually measured.
+- Milestone progress → `docs/ROADMAP.md`, and `docs/DECISIONS.md` if a gate closes.
 - Any claim that changes reality (new command, new surface, benchmark) → fix
   the status lines in README/TESTING/PERFORMANCE that say it does not exist.
 
@@ -165,7 +165,7 @@ support in V1.
 
 ## Where to start reading
 
-`README.md` → `PRD.md` → `SCOPE.md` → `DECISIONS.md` → `ROADMAP.md` for intent;
+`README.md` → `docs/PRD.md` → `docs/SCOPE.md` → `docs/DECISIONS.md` → `docs/ROADMAP.md` for intent;
 `src/main.rs` → `src/bar.rs` → `src/hyprland.rs` for the code,
 `src/launcher.rs` → `src/desktop.rs` → `src/ipc.rs` for the launcher slice,
 `src/gpu/` for the renderer spike; `docs/adr/` for the reasoning behind locked

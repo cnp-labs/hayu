@@ -1,6 +1,6 @@
 # Testing strategy and release gate
 
-Status: plan with a partial M0 suite. `cargo test` runs 43 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, IME, scale 2, two outputs and config reload were exercised live (see below); the launcher and reload harnesses are checked in under `tools/live/`, and the IME run used fcitx5 plus fcitx5-anthy. Screen-reader, soak, fractional scale and mixed per-output scales have not been run.
+Status: plan with a partial M0 suite. `cargo test` runs 43 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, IME, scale 2, two outputs and config reload were exercised live (see below); the launcher and reload harnesses are checked in under `../tools/live/`, and the IME run used fcitx5 plus fcitx5-anthy. Screen-reader, soak, fractional scale and mixed per-output scales have not been run.
 
 ## Testing layers
 
@@ -13,7 +13,7 @@ Status: plan with a partial M0 suite. `cargo test` runs 43 unit tests covering c
 ## Launcher live input check (November 5, 2026)
 
 Run at commit `10fbb4c` on the target machine (Hyprland 0.57.0, one output, scale 1). Keys were sent as real Wayland input through a throwaway `zwp_virtual_keyboard_v1` client; the shell was observed through `HAYU_DEBUG_KEYS=1` and `HAYU_DEBUG_SCAN=1` traces plus `hyprctl layers -j`, because no screenshot tool is installed. That run used a throwaway build of the
-same approach; the harness now lives in `tools/live/` and the suite was re-run
+same approach; the harness now lives in `../tools/live/` and the suite was re-run
 at `d3781f7` (15 checks, all pass).
 
 | Check | Result |
@@ -35,11 +35,11 @@ Unit tests still own the parts the live run cannot isolate: Exec tokenization an
 
 ### Method and limits
 
-- Harness: `tools/live/keyin`, a small client that binds
+- Harness: `../tools/live/keyin`, a small client that binds
   `zwp_virtual_keyboard_v1` on the Hyprland seat, uploads an xkb keymap and
   sends press/release pairs 20 ms apart (one held press for the repeat check).
-  `tools/live/input-suite.sh` drives it and reads the trace. Both are in the
-  repository now; see `tools/live/README.md` for the commands and its limits.
+  `../tools/live/input-suite.sh` drives it and reads the trace. Both are in the
+  repository now; see `../tools/live/README.md` for the commands and its limits.
 - Observation: `HAYU_DEBUG_KEYS=1` printed keysym, UTF-8, query, selection,
   result count, first names and per-frame draw time; `HAYU_DEBUG_SCAN=1`
   printed the scan duration; `hyprctl layers -j` confirmed whether the overlay
@@ -120,7 +120,7 @@ inferred from the config file alone.
 | A widget-list change still exits 0 and prints `restart required for: bar.left` | Superseded by *Bar module areas* (November 7, 2026) |
 | Theme/accent and clock-format change | Applied, no pixel diff |
 
-- Method: `tools/live/reload-suite.sh` (41 checks at `310a7c7`) writes small
+- Method: `../tools/live/reload-suite.sh` (41 checks at `310a7c7`) writes small
   config files with `printf`, calls `hayu reload` between steps, and reads
   `h`/`y` of the `hayu` layer plus the `hayu-launcher` layer count. It starts
   its own shell against a temporary `XDG_CONFIG_HOME`, creates a headless
@@ -173,7 +173,7 @@ because it composes visible Japanese from Latin keys, so a wrong commit is
 obvious without a candidate UI. The input method ran with `fcitx5 --replace -d`
 against a temporary `XDG_CONFIG_HOME` holding both `hayu/config.toml` and an
 `fcitx5/profile` with one anthy group, and `fcitx5-remote -o` activated it;
-`fcitx5-remote -n` reported `anthy`. Keys came from `tools/live/keyin` and the
+`fcitx5-remote -n` reported `anthy`. Keys came from `../tools/live/keyin` and the
 launcher was driven through the control socket. `HAYU_DEBUG_IME=1` and
 `WAYLAND_DEBUG=1` recorded event kinds and lengths, and `HAYU_DEBUG_KEYS=1`
 printed the query only for the checks that need it.
@@ -187,7 +187,7 @@ printed the query only for the checks that need it.
 | I5 | Editing stays inside the protocol | Pass: BackSpace during the preedit took `にほn` to `にほ`; `query_len` stayed 0 |
 | I6 | Surrounding text stays correct | Pass: after the commit the client sent `日本` 6/6; BackSpace then removed one character and sent `日` 3/3, leaving one matching entry |
 | I7 | Close and reopen reset the field | Pass: closing with a preedit logged `ime disabled`; reopening logged `ime enabled` and `set_surrounding_text("", 0, 0)`, and the next preedit started from `f`, not from the old text |
-| I8 | Missing IME falls back cleanly | Pass: with fcitx5 stopped, `tools/live/input-suite.sh` passed 15/15 and reported no protocol error |
+| I8 | Missing IME falls back cleanly | Pass: with fcitx5 stopped, `../tools/live/input-suite.sh` passed 15/15 and reported no protocol error |
 | I9 | Teardown is clean | Pass: `hayu quit` with a preedit exited 0 and sent `disable` + `commit` before destroying the layers; reloading `launcher.enabled=false` exited 0, closed the overlay and logged `ime disabled`; removing the focused headless output with a preedit left the shell alive, removed the launcher layer and logged `ime disabled` |
 | I10 | Text is not logged by default | Pass: with `HAYU_DEBUG_IME=1` and no `HAYU_DEBUG_KEYS=1`, the trace held only counts and lengths, and a search for `にほ`, `日本` and `nihon` in the log found nothing |
 
@@ -205,7 +205,7 @@ printed the query only for the checks that need it.
      `XDG_CONFIG_HOME`), then run `hayu launcher open`.
   2. Activate anthy: `fcitx5-remote -o`; `fcitx5-remote` must answer `2` and
      `fcitx5-remote -n` must answer `anthy`.
-  3. Type `nihon` with `tools/live/keyin`; the preedit appears and the result
+  3. Type `nihon` with `../tools/live/keyin`; the preedit appears and the result
      list stays unchanged.
   4. Press Escape once: the preedit disappears and `hyprctl layers -j` still
      lists `hayu-launcher`.
@@ -223,7 +223,7 @@ Run at `c8017ee` on the same session (Hyprland 0.57.0, one 1366×768 output at
 scale 1) with `accesskit 0.25.2`, `accesskit_unix 0.24.1` and `at-spi2-core`.
 Orca and accerciser were not installed, so this records the AT-SPI tree, not
 speech. The session had `org.a11y.Status IsEnabled=false` and no assistive
-client; `tools/live/a11y-suite.py` sets it true for the run and restores the
+client; `../tools/live/a11y-suite.py` sets it true for the run and restores the
 original value. Hayu ran from a temporary `XDG_CONFIG_HOME`, `XDG_DATA_HOME`
 and `XDG_RUNTIME_DIR` with three synthetic entries (`A11y Birch`, `A11y Cedar`,
 `A11y Maple`), so the user's shell and desktop entries were untouched. The
@@ -344,8 +344,8 @@ WAYLAND_DEBUG=1 XDG_CONFIG_HOME=/tmp/... ./target/release/hayu run
 - What was not observed: a live 1.25 scale (unit test only); the input and reload suites at 1.5 (they ran at scale 1); a composited screenshot; and the integer fallback, because both globals were present.
 - The compositor restarted during this work: `coredumpctl` records a Hyprland 0.57.1 SIGSEGV inside its own cleanup path (`CCompositor::cleanup` → monitor and protocol destructors), its log has no hayu or viewport protocol error, and the suite results above were re-run on the new instance with the new `HYPRLAND_INSTANCE_SIGNATURE`. What requested that shutdown is not visible in the available logs.
 ### Bar module areas (November 7, 2026)
-Unit checks in `src/render.rs` cover the layout: `bar_areas_follow_the_configured_modules` puts `clock` in the left area and `workspaces` in the right and asserts their drawn positions, and `crowded_bar_stays_inside_the_frame` draws twelve workspaces plus a long title into a 320-pixel frame and asserts that no rect or glyph leaves the frame. `unknown_bar_widget_is_a_config_error` rejects `netwrk` in `bar.right` with the area path in the message.
-Live check at this commit: `cargo test` 51/51, `tools/live/reload-suite.sh` 42/42. The suite changes `bar.center` and asserts that the reload prints no bar-area restart notice while a `[tray]` change is still reported, and it keeps the geometry, filter and `bar.enabled` checks.
+Unit checks in `../src/render.rs` cover the layout: `bar_areas_follow_the_configured_modules` puts `clock` in the left area and `workspaces` in the right and asserts their drawn positions, and `crowded_bar_stays_inside_the_frame` draws twelve workspaces plus a long title into a 320-pixel frame and asserts that no rect or glyph leaves the frame. `unknown_bar_widget_is_a_config_error` rejects `netwrk` in `bar.right` with the area path in the message.
+Live check at this commit: `cargo test` 51/51, `../tools/live/reload-suite.sh` 42/42. The suite changes `bar.center` and asserts that the reload prints no bar-area restart notice while a `[tray]` change is still reported, and it keeps the geometry, filter and `bar.enabled` checks.
 - What was not observed: a composited screenshot of the new layout, the areas at fractional scale, and pointer or workspace-click behaviour — the bar has no input regions yet.
 ### Bar workspace click (November 7, 2026)
 Run at `f266ba9` on Hyprland 0.57.1 with one 1366×768 output at scale 1. The
@@ -360,7 +360,7 @@ logical coordinates; the click point was the pill's centre.
 | A left click on the pill for workspace 1 focuses workspace 1 again | Live pass |
 | A left click on empty bar space leaves the active workspace unchanged | Live pass |
 | The shell survives the clicks and `hayu quit` exits 0 | Live pass |
-- Method: `tools/live/pointer-suite.sh` (7 checks) reads
+- Method: `../tools/live/pointer-suite.sh` (7 checks) reads
   `hyprctl -j activeworkspace` before and after each click, and derives the
   click point from the drawn pill geometry rather than a hard-coded x.
 - Rounding: `cargo test` 52/52, including `workspace_hit_test_uses_the_drawn_pills`
@@ -377,7 +377,7 @@ Run at `2c440da` on Hyprland 0.57.1 with one 1366×768 output at scale 1. The
 real session already has another watcher (noctalia), so the check ran inside
 `dbus-run-session` on a private bus; fcitx5 5.1.23 was the tray application,
 started with a private `XDG_RUNTIME_DIR` whose `wayland-1` symlinks the real
-socket. `tools/live/tray-suite.sh` also starts a second shell to prove it does
+socket. `../tools/live/tray-suite.sh` also starts a second shell to prove it does
 not take the name.
 | Check | Result |
 | --- | --- |
@@ -413,7 +413,7 @@ of that emulator accepts the form.
 | alacritty | `alacritty -e <program> <args>` | Stub argv live; `-e, --command` from `alacritty(1)` |
 | kitty | `kitty -- <program> <args>` | Stub argv live; `--` terminator in kitty's CLI parser |
 | wezterm | `wezterm start -- <program> <args>` | Stub argv live; `start` from `wezterm start --help` |
-| ghostty | `ghostty -e <program> <args>` | Stub argv live; `-e` special case in `src/cli/ghostty.zig` |
+| ghostty | `ghostty -e <program> <args>` | Stub argv live; `-e` special case in `../src/cli/ghostty.zig` |
 | konsole | `konsole -e <program> <args>` | Stub argv live; `-e` in the Konsole manual |
 | xterm | `xterm -e <program> <args>` | Stub argv live; `-e program [arguments]` in `xterm(1)` |
 | `$TERMINAL` | a known emulator keeps its row's form, anything else gets `-e` | Stub argv live for `kitty` by name and by absolute path (both `--`); every known name is unit-tested |

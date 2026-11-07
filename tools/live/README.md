@@ -2,7 +2,7 @@
 
 Two scripts that drive the real `hayu` binary on a real Hyprland session and
 record what happened. They exist so the live evidence in
-[TESTING.md](../../TESTING.md) can be reproduced instead of trusted.
+[TESTING.md](../../docs/TESTING.md) can be reproduced instead of trusted.
 
 ```
 tools/live/input-suite.sh     # launcher: typing, selection, launch, terminal, errors

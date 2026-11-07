@@ -37,7 +37,7 @@ Documentation language update: the user subsequently requested **English for all
 
 | ID | Decision | Owner / gate | Required evidence |
 | --- | --- | --- | --- |
-| O-01 | **Resolved 2026-11-05: GLES/EGL with glow; CPU path for tests** ([ADR-0006](docs/adr/0006-renderer-criteria.md)) | Closed / M0 | Spike measurements in ADR-0006; wgpu rejected on tie-break |
+| O-01 | **Resolved 2026-11-05: GLES/EGL with glow; CPU path for tests** ([ADR-0006](adr/0006-renderer-criteria.md)) | Closed / M0 | Spike measurements in ADR-0006; wgpu rejected on tie-break |
 | O-02 | Event loop, executor, worker model | Maintainer / M0 | Wayland integration, wakeups, shutdown, async |
 | O-03 | Text stack and protocol libraries | Maintainer / M1 | Shaping, Unicode, font fallback, IME, licensing |
 | O-04 | AT-SPI bridge and semantics coverage | Maintainer / M1 | Screen reader/focus spike and dependencies |

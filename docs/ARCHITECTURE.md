@@ -36,7 +36,7 @@ Frame phases: apply events/update → measure/layout if geometry changed → ren
 
 Each output tracks logical size, scale, transform, buffer size, and resource generation. Hit testing uses logical coordinates; visual clips match hit regions. Scale comes from `wp_fractional_scale_v1` when it and `wp_viewporter` are both offered: the fractional object and a `wp_viewport` are created before the surface's first commit, the surface keeps `wl_surface.buffer_scale` at 1, the viewport destination is the logical size, and the buffer is `round(logical × preferred_scale/120)`. Without them the output's integer scale sets `buffer_scale` and no viewport is used, and the shell logs that limitation once. Integer output-scale events are ignored while a fractional object owns the surface. Scale changes invalidate related text/geometry caches. Hidden surfaces without animation needs do not continuously request frames.
 
-The renderer is GLES/EGL with glow ([ADR-0006](docs/adr/0006-renderer-criteria.md)). `src/render.rs` owns the backend-neutral interface: a `Frame` is a clear colour plus solid rects and glyph quads, and an `Atlas` rasterizes a glyph the first time it is drawn and reuses it afterwards. Text is shaped and rasterized during frame construction, never by a backend.
+The renderer is GLES/EGL with glow ([ADR-0006](adr/0006-renderer-criteria.md)). `src/render.rs` owns the backend-neutral interface: a `Frame` is a clear colour plus solid rects and glyph quads, and an `Atlas` rasterizes a glyph the first time it is drawn and reuses it afterwards. Text is shaped and rasterized during frame construction, never by a backend.
 `src/render/gl.rs` presents a frame on one layer surface: one EGL context and window surface per output, `make_current` before every draw because outputs do not share a context, a dynamic vertex buffer rebuilt from the frame, a full atlas upload only when its version changed, and `swap_buffers` as the surface commit. The EGL window surface follows the frame's pixel size, so a fractional preferred scale only changes that size and the viewport destination. Surfaces own their atlas and presenter, and the presenter drops before the layer surface whose `wl_surface` it wraps.
 `render::build` lays the bar out from `bar.left`, `bar.center` and `bar.right` at draw time, so a reload re-applies the module lists without a restart. The centre area is measured first and starts at the frame's centre; the side areas get the room left over. A module that does not fit is dropped rather than allowed to overflow: workspaces stop at the first pill that does not fit, the title is ellipsized, and a clock or title that still does not fit is skipped. Config validation rejects IDs outside `BAR_MODULES`; IDs whose module does not exist yet draw nothing.
 `render::rasterize` is the reference implementation for tests: it consumes the same frame and atlas and returns a pixmap. It is not a user-selectable fallback; a second production backend is not promised for V1. No frame loop is added: frames are still built only from events, configure and the minute tick.
@@ -54,7 +54,7 @@ value, and named result items with the active selection flag. Closing removes
 children and hides the root. This is a launcher-only spike, not the proposed
 component semantics system: actions, text editing/caret APIs, IME preedit,
 geometry and bar semantics are not covered. Screen reader acceptance remains
-separate from AT-SPI bus inspection; see TESTING.md.
+separate from AT-SPI bus inspection; see [TESTING.md](TESTING.md).
 
 ## 5. Surfaces and focus
 

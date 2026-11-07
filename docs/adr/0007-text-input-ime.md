@@ -1,7 +1,7 @@
 # ADR-0007 — Text input and IME through text-input-v3
 Date: November 6, 2026. Status: **accepted**; the slice is implemented in
 `4de4112` and I1-I10 were run with fcitx5 and fcitx5-anthy (results in
-TESTING.md). IME acceptance is **not complete**: I4 does not pass, because the
+../TESTING.md). IME acceptance is **not complete**: I4 does not pass, because the
 input method consumes the second Escape after a cancelled composition.
 
 ## Context
@@ -9,7 +9,7 @@ The launcher is a layer-shell surface with an exclusive keyboard grab while it
 is open. Today it turns `wl_keyboard` keysyms into text itself, which covers
 ASCII but cannot produce composed text. M1 requires proven IME support before
 the launcher can be called usable for non-Latin input, and O-03 in
-DECISIONS.md still leaves the text stack and protocol libraries open.
+../DECISIONS.md still leaves the text stack and protocol libraries open.
 
 Hyprland 0.57.0 advertises `zwp_text_input_manager_v3` and
 `zwp_input_method_manager_v2`. The client side of the first is the only role
@@ -103,7 +103,7 @@ These criteria are the M1 exit evidence. They are run with
 reference machine at the time of this ADR), started with `fcitx5 --replace -d`
 and toggled with `fcitx5-remote -o`. Anthy is chosen because it composes
 visible Japanese text from Latin keys, so a failure is obvious without relying
-on a candidate UI. The table exists in TESTING.md at `4de4112`. I4 stays open, so
+on a candidate UI. The table exists in docs/../TESTING.md at `4de4112`. I4 stays open, so
 this ADR supports a launcher IME claim only with that exception stated: after a
 cancelled composition, one Escape is consumed by the input method before the
 next one closes the overlay.
@@ -144,7 +144,7 @@ keyboard path and `commit_string` must not both insert the same letter.
 - Composition is visible only inside the launcher; V1 text fields need the
   same protocol but are not covered by this ADR.
 - O-03 remains open for shaping, font fallback and the rest of the text stack;
-  this ADR only fixes the IME protocol and the keyboard fallback. DECISIONS.md
+  this ADR only fixes the IME protocol and the keyboard fallback. docs/../DECISIONS.md
   records the decision as D-10.
 - The existing evidence for keyboard-only use stays valid; an IME claim is
   added only when I1–I10 pass on a recorded commit.

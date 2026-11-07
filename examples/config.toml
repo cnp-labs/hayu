@@ -1,5 +1,5 @@
 # Hayu: proposed schema; no implementation binary is available yet.
-# See CONFIGURATION.md for key/default contracts.
+# See docs/CONFIGURATION.md for key/default contracts.
 schema_version = 1
 
 [appearance]
