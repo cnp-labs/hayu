@@ -862,7 +862,6 @@ dependencies = [
  "smithay-client-toolkit",
  "tiny-skia",
  "toml",
- "wayland-backend",
  "wayland-client",
  "wayland-protocols",
  "wgpu",

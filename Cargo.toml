@@ -25,13 +25,12 @@ smithay-client-toolkit = { version = "0.21", features = ["calloop"] }
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"], optional = true }
 libc = { version = "0.2", optional = true }
 toml = "1"
-wayland-backend = { version = "0.3", features = ["client_system"] }
-wayland-client = "0.31"
+wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 xkbcommon = "0.8"
 accesskit = "0.25"
 accesskit_unix = "0.24"
-zbus = "5"
+zbus = { version = "5", default-features = false, features = ["async-io"] }
 async-channel = "2"
 futures-lite = "2"
 png = "0.18"
