@@ -22,6 +22,12 @@ pub struct Frame {
     /// Workspace pills exactly as drawn, in buffer pixels. Hit testing reads
     /// this list instead of recomputing the layout.
     pub pills: Vec<Pill>,
+    /// Tray icons as drawn, in buffer pixels, with the index of their source.
+    pub tray_hits: Vec<TrayHit>,
+    /// One strip holding the tray icons, uploaded only when `version` changes.
+    pub image: Option<Image>,
+    /// Quads sampling `image`, drawn above solids and below glyphs.
+    pub sprites: Vec<Sprite>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,6 +35,47 @@ pub struct Pill {
     pub id: i64,
     pub x: f32,
     pub w: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrayHit {
+    pub id: usize,
+    pub x: f32,
+    pub w: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sprite {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub uv: [f32; 4],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub version: u32,
+}
+
+/// A tray icon and the source index the click reports.
+#[derive(Clone, Debug)]
+pub struct TrayImage {
+    pub id: usize,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Tray icon whose drawn rect contains `logical_x`, if any.
+pub fn tray_at(hits: &[TrayHit], logical_x: f32, scale: f32) -> Option<usize> {
+    let x = logical_x * scale;
+    hits.iter()
+        .find(|hit| x >= hit.x && x < hit.x + hit.w)
+        .map(|hit| hit.id)
 }
 
 /// Workspace whose drawn pill contains `logical_x`, if any.
@@ -74,6 +121,9 @@ impl Frame {
             rects: Vec::new(),
             glyphs: Vec::new(),
             pills: Vec::new(),
+            tray_hits: Vec::new(),
+            image: None,
+            sprites: Vec::new(),
         })
     }
 
@@ -298,6 +348,46 @@ pub fn rasterize(frame: &Frame, atlas: &Atlas) -> Option<Pixmap> {
         }
     }
 
+    if let Some(image) = &frame.image {
+        for sprite in &frame.sprites {
+            let x0 = (sprite.x.round() as i32).clamp(0, width);
+            let y0 = (sprite.y.round() as i32).clamp(0, height);
+            let x1 = ((sprite.x + sprite.w).round() as i32).clamp(0, width);
+            let y1 = ((sprite.y + sprite.h).round() as i32).clamp(0, height);
+            let (u0, v0, u1, v1) = (
+                sprite.uv[0] as f64,
+                sprite.uv[1] as f64,
+                sprite.uv[2] as f64,
+                sprite.uv[3] as f64,
+            );
+            for py in y0..y1 {
+                for px in x0..x1 {
+                    let fx = (px as f32 + 0.5 - sprite.x) / sprite.w.max(1.0);
+                    let fy = (py as f32 + 0.5 - sprite.y) / sprite.h.max(1.0);
+                    let tx = (((u0 + (u1 - u0) * fx as f64) * image.width as f64) as u32)
+                        .min(image.width.saturating_sub(1));
+                    let ty = (((v0 + (v1 - v0) * fy as f64) * image.height as f64) as u32)
+                        .min(image.height.saturating_sub(1));
+                    let texel = ((ty * image.width + tx) * 4) as usize;
+                    let alpha = image.rgba[texel + 3] as u32;
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let index = ((py * width + px) * 4) as usize;
+                    let inverse = 255 - alpha;
+                    for channel in 0..3 {
+                        data[index + channel] =
+                            ((image.rgba[texel + channel] as u32 * alpha
+                                + data[index + channel] as u32 * inverse)
+                                / 255) as u8;
+                    }
+                    data[index + 3] = (alpha + data[index + 3] as u32 * inverse / 255).min(255)
+                        as u8;
+                }
+            }
+        }
+    }
+
     for glyph in &frame.glyphs {
         for dy in 0..glyph.h as i32 {
             for dx in 0..glyph.w as i32 {
@@ -377,6 +467,9 @@ pub struct Scene<'a> {
     pub left: &'a [&'a str],
     pub center: &'a [&'a str],
     pub right: &'a [&'a str],
+    pub tray: &'a [TrayImage],
+    /// Bumped whenever a tray icon changes; the presenter re-uploads then.
+    pub tray_version: u32,
 }
 
 pub fn build(scene: &Scene<'_>, fonts: &mut FontSystem, atlas: &mut Atlas) -> Option<Frame> {
@@ -394,6 +487,7 @@ pub fn build(scene: &Scene<'_>, fonts: &mut FontSystem, atlas: &mut Atlas) -> Op
     let edge = 8.0 * scale;
     let gap = 10.0 * scale;
     let text_y = ((scene.height as f32) - font_size * 1.3) / 2.0;
+    build_tray(&mut frame, scene, scale);
     // Centre first: the side areas only get the room it leaves.
     let center_width = area_width(fonts, scene, scene.center, font_size, scale)
         .min((width - 2.0 * edge).max(0.0));
@@ -464,6 +558,7 @@ fn area_width(
             "active_window" if !scene.title.is_empty() => {
                 text_width(fonts, scene.title, font_size)
             }
+            "tray" => tray_width(scene, scale),
             _ => 0.0,
         };
         if width > 0.0 {
@@ -507,6 +602,7 @@ fn draw_area(
                     0.0
                 }
             }
+            "tray" => draw_tray(frame, scene, x + offset, remaining, scale),
             "active_window" if !scene.title.is_empty() && remaining >= 16.0 * scale => {
                 let title = ellipsize(scene.title, remaining, |s| text_width(fonts, s, font_size));
                 if title.is_empty() {
@@ -524,6 +620,121 @@ fn draw_area(
         }
         x += offset + width;
         used += offset + width;
+    }
+}
+
+/// Logical tray icon edge: the bar height minus padding, bounded so a short
+/// bar still shows something.
+fn tray_icon_size(scene: &Scene<'_>, scale: f32) -> f32 {
+    ((scene.height as f32) - 12.0 * scale).clamp(8.0 * scale, 22.0 * scale)
+}
+
+fn tray_width(scene: &Scene<'_>, scale: f32) -> f32 {
+    if scene.tray.is_empty() {
+        return 0.0;
+    }
+    let icon = tray_icon_size(scene, scale);
+    icon * scene.tray.len() as f32 + 6.0 * scale * (scene.tray.len() - 1) as f32
+}
+
+/// Concatenate every icon into one strip and record the quad for each. The
+/// strip is only uploaded when its version changes.
+fn build_tray(frame: &mut Frame, scene: &Scene<'_>, scale: f32) {
+    if scene.tray.is_empty() {
+        return;
+    }
+    let icon = tray_icon_size(scene, scale);
+    let gap = 6.0 * scale;
+    let width: u32 = scene.tray.iter().map(|image| image.width).sum();
+    let height = scene
+        .tray
+        .iter()
+        .map(|image| image.height)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    let mut x = 0u32;
+    let cells: Vec<(u32, u32, u32)> = scene
+        .tray
+        .iter()
+        .map(|image| {
+            let cell = (x, image.width.max(1), image.height.max(1));
+            x += image.width.max(1);
+            cell
+        })
+        .collect();
+    // Icons arrive as tightly packed RGBA rows; copy each into the strip.
+    for (index, image) in scene.tray.iter().enumerate() {
+        let (cell_x, _cell_w, cell_h) = cells[index];
+        for row in 0..cell_h {
+            let start = (row * image.width) as usize * 4;
+            let copy = (image.width as usize * 4).min(image.rgba.len().saturating_sub(start));
+            if copy == 0 {
+                continue;
+            }
+            let dest = ((row * width + cell_x) as usize) * 4;
+            let end = dest + copy;
+            if rgba.len() < end {
+                rgba.resize(end, 0);
+            }
+            rgba[dest..end].copy_from_slice(&image.rgba[start..start + copy]);
+        }
+    }
+    rgba.resize((width * height * 4) as usize, 0);
+    let mut draw_x = 0.0;
+    for (index, image) in scene.tray.iter().enumerate() {
+        let (cell_x, cell_w, cell_h) = cells[index];
+        frame.tray_hits.push(TrayHit {
+            id: image.id,
+            x: draw_x,
+            w: icon,
+        });
+        frame.sprites.push(Sprite {
+            x: draw_x,
+            y: ((scene.height as f32) - icon) / 2.0,
+            w: icon,
+            h: icon,
+            uv: [
+                cell_x as f32 / width as f32,
+                0.0,
+                (cell_x + cell_w) as f32 / width as f32,
+                cell_h as f32 / height as f32,
+            ],
+        });
+        draw_x += icon + gap;
+    }
+    frame.image = Some(Image {
+        width,
+        height,
+        rgba,
+        version: scene.tray_version,
+    });
+}
+
+/// Place the strip quads for the `tray` module inside its area, dropping icons
+/// that do not fit so a click never lands on something that was not painted.
+fn draw_tray(frame: &mut Frame, scene: &Scene<'_>, start: f32, budget: f32, scale: f32) -> f32 {
+    if scene.tray.is_empty() {
+        return 0.0;
+    }
+    let icon = tray_icon_size(scene, scale);
+    let gap = 6.0 * scale;
+    let count = (((budget + gap) / (icon + gap)).floor() as usize)
+        .min(frame.sprites.len())
+        .min(frame.tray_hits.len());
+    for index in 0..count {
+        let x = start + (icon + gap) * index as f32;
+        frame.sprites[index].x = x;
+        frame.tray_hits[index].x = x;
+        frame.tray_hits[index].w = icon;
+    }
+    frame.sprites.truncate(count);
+    frame.tray_hits.truncate(count);
+    if count == 0 {
+        0.0
+    } else {
+        icon * count as f32 + gap * (count - 1) as f32
     }
 }
 
@@ -770,6 +981,8 @@ mod tests {
             left: &left,
             center: &center,
             right: &right,
+            tray: &[],
+            tray_version: 0,
         };
         let frame = build(&scene, &mut fonts, &mut atlas).expect("frame");
         let clock_x = frame
@@ -793,6 +1006,63 @@ mod tests {
             "no glyph crossed the right edge"
         );
     }
+    #[test]
+    fn tray_icons_draw_and_hit_test() {
+        let mut fonts = FontSystem::new();
+        if fonts.db().is_empty() {
+            return;
+        }
+        let theme = Theme::from_config("dark", "#8AB4F8");
+        let red = TrayImage {
+            id: 0,
+            width: 2,
+            height: 2,
+            rgba: [255, 0, 0, 255].repeat(4),
+        };
+        let blue = TrayImage {
+            id: 1,
+            width: 2,
+            height: 2,
+            rgba: [0, 0, 255, 255].repeat(4),
+        };
+        let tray = [red, blue];
+        let left: [&str; 0] = [];
+        let center: [&str; 0] = [];
+        let right = ["tray"];
+        let mut atlas = Atlas::new();
+        let scene = Scene {
+            width: 400,
+            height: 32,
+            scale: 1.0,
+            theme: &theme,
+            clock: "",
+            title: "",
+            workspaces: &[],
+            active_workspace: 1,
+            left: &left,
+            center: &center,
+            right: &right,
+            tray: &tray,
+            tray_version: 7,
+        };
+        let frame = build(&scene, &mut fonts, &mut atlas).expect("frame");
+        assert_eq!(frame.tray_hits.len(), 2, "both icons are drawn");
+        assert_eq!(frame.image.as_ref().map(|image| image.version), Some(7));
+        let first = frame.tray_hits[0];
+        assert!(
+            first.x + first.w <= 400.0,
+            "icons stay inside the frame: {first:?}"
+        );
+        assert_eq!(tray_at(&frame.tray_hits, first.x + first.w / 2.0, 1.0), Some(0));
+        let second = frame.tray_hits[1];
+        assert_eq!(tray_at(&frame.tray_hits, second.x + second.w / 2.0, 1.0), Some(1));
+        assert_eq!(tray_at(&frame.tray_hits, 0.0, 1.0), None, "left edge is empty");
+        let pixmap = rasterize(&frame, &atlas).expect("pixels");
+        let pixels = pixmap.data();
+        let index = ((16 * 400 + (second.x + second.w / 2.0) as i32) * 4) as usize;
+        assert_eq!(&pixels[index..index + 3], &[0, 0, 255], "blue icon pixel");
+    }
+
     #[test]
     fn workspace_hit_test_uses_the_drawn_pills() {
         let pills = [
@@ -848,6 +1118,8 @@ mod tests {
             left: &left,
             center: &center,
             right: &right,
+            tray: &[],
+            tray_version: 0,
         };
         let frame = build(&scene, &mut fonts, &mut atlas).expect("frame");
         for rect in &frame.rects {

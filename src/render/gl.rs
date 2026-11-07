@@ -27,7 +27,9 @@ pub struct GlPresenter {
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     texture: glow::Texture,
+    image_texture: glow::Texture,
     atlas_version: Option<u32>,
+    image_version: Option<u32>,
     mode: Option<glow::UniformLocation>,
     sampler: Option<glow::UniformLocation>,
     width: u32,
@@ -70,7 +72,7 @@ impl GlPresenter {
             glow::Context::from_loader_function_cstr(|name| display.get_proc_address(name))
         };
         unsafe {
-            let (program, vao, vbo, texture) = setup(&gl)?;
+            let (program, vao, vbo, texture, image_texture) = setup(&gl)?;
             gl.enable(glow::FRAMEBUFFER_SRGB);
             let mode = gl.get_uniform_location(program, "u_mode");
             let sampler = gl.get_uniform_location(program, "u_tex");
@@ -83,7 +85,9 @@ impl GlPresenter {
                 vao,
                 vbo,
                 texture,
+                image_texture,
                 atlas_version: None,
+                image_version: None,
                 mode,
                 sampler,
                 width,
@@ -133,6 +137,27 @@ impl GlPresenter {
             }
         }
         let solid_end = vertices.len() as u32 / 7;
+        for sprite in &frame.sprites {
+            let (x0, y0) = (sprite.x, sprite.y);
+            let (x1, y1) = (x0 + sprite.w, y0 + sprite.h);
+            let uv = sprite.uv;
+            let corners = [
+                (x0, y0, [uv[0], uv[1]]),
+                (x1, y0, [uv[2], uv[1]]),
+                (x0, y1, [uv[0], uv[3]]),
+                (x1, y1, [uv[2], uv[3]]),
+            ];
+            for index in [0, 1, 2, 2, 1, 3] {
+                let (x, y, uv) = corners[index];
+                push(
+                    &mut vertices,
+                    ndc(x, y, frame.width as f32, frame.height as f32),
+                    uv,
+                    [1.0, 1.0, 1.0],
+                );
+            }
+        }
+        let sprite_end = vertices.len() as u32 / 7;
         for glyph in &frame.glyphs {
             let color = linear(glyph.color);
             let (x0, y0) = (glyph.x, glyph.y);
@@ -173,22 +198,37 @@ impl GlPresenter {
             );
 
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
             gl.uniform_1_i32(self.sampler.as_ref(), 0);
-            if self.atlas_version != Some(atlas.version) {
-                upload_atlas(gl, self.texture, atlas);
-                self.atlas_version = Some(atlas.version);
-            }
-
             gl.uniform_1_i32(self.mode.as_ref(), 0);
             gl.draw_arrays(glow::TRIANGLES, 0, solid_end as i32);
-            gl.uniform_1_i32(self.mode.as_ref(), 1);
-            gl.draw_arrays(
-                glow::TRIANGLES,
-                solid_end as i32,
-                (total - solid_end) as i32,
-            );
-
+            if sprite_end > solid_end {
+                if let Some(image) = &frame.image
+                    && self.image_version != Some(image.version)
+                {
+                    upload_image(gl, self.image_texture, image);
+                    self.image_version = Some(image.version);
+                }
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.image_texture));
+                gl.uniform_1_i32(self.mode.as_ref(), 2);
+                gl.draw_arrays(
+                    glow::TRIANGLES,
+                    solid_end as i32,
+                    (sprite_end - solid_end) as i32,
+                );
+            }
+            if total > sprite_end {
+                gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+                if self.atlas_version != Some(atlas.version) {
+                    upload_atlas(gl, self.texture, atlas);
+                    self.atlas_version = Some(atlas.version);
+                }
+                gl.uniform_1_i32(self.mode.as_ref(), 1);
+                gl.draw_arrays(
+                    glow::TRIANGLES,
+                    sprite_end as i32,
+                    (total - sprite_end) as i32,
+                );
+            }
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.bind_vertex_array(None);
         }
@@ -210,6 +250,7 @@ impl Drop for GlPresenter {
             self.gl.delete_vertex_array(self.vao);
             self.gl.delete_buffer(self.vbo);
             self.gl.delete_texture(self.texture);
+            self.gl.delete_texture(self.image_texture);
         }
         let _ = &self.display;
     }
@@ -289,6 +330,7 @@ unsafe fn setup(
         glow::VertexArray,
         glow::Buffer,
         glow::Texture,
+        glow::Texture,
     ),
     String,
 > {
@@ -323,8 +365,10 @@ out vec4 out_color;
 void main() {
     if (u_mode == 0) {
         out_color = vec4(v_color, 1.0);
-    } else {
+    } else if (u_mode == 1) {
         out_color = vec4(v_color, texture(u_tex, v_uv).a);
+    } else {
+        out_color = texture(u_tex, v_uv);
     }
 }
 "#,
@@ -355,8 +399,9 @@ void main() {
         gl.vertex_attrib_pointer_f32(2, 3, glow::FLOAT, false, STRIDE, 16);
         gl.bind_vertex_array(None);
 
-        let texture = gl.create_texture().map_err(|err| err.to_string())?;
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        let texture = new_texture(gl)?;
+        let image_texture = new_texture(gl)?;
+        gl.use_program(Some(program));
         gl.tex_parameter_i32(
             glow::TEXTURE_2D,
             glow::TEXTURE_MIN_FILTER,
@@ -385,7 +430,34 @@ void main() {
         gl.disable(glow::DEPTH_TEST);
         gl.disable(glow::CULL_FACE);
         gl.bind_vertex_array(None);
-        Ok((program, vao, vbo, texture))
+        Ok((program, vao, vbo, texture, image_texture))
+    }
+}
+unsafe fn new_texture(gl: &glow::Context) -> Result<glow::Texture, String> {
+    unsafe {
+        let texture = gl.create_texture().map_err(|err| err.to_string())?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        Ok(texture)
     }
 }
 
@@ -404,6 +476,23 @@ unsafe fn compile(gl: &glow::Context, kind: u32, source: &str) -> Result<glow::S
     }
 }
 
+unsafe fn upload_image(gl: &glow::Context, texture: glow::Texture, image: &super::Image) {
+    unsafe {
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::SRGB8_ALPHA8 as i32,
+            image.width as i32,
+            image.height as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&image.rgba)),
+        );
+    }
+}
 unsafe fn upload_atlas(gl: &glow::Context, texture: glow::Texture, atlas: &Atlas) {
     unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
