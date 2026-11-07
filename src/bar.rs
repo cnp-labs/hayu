@@ -9,6 +9,7 @@ use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction};
 use chrono::{Local, Timelike};
 use cosmic_text::FontSystem;
+use smithay_client_toolkit::dispatch2::Dispatch2;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -30,9 +31,16 @@ use wayland_client::{
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_seat, wl_surface},
 };
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+};
 use wayland_protocols::wp::text_input::zv3::client::{
     zwp_text_input_manager_v3::ZwpTextInputManagerV3,
     zwp_text_input_v3::{self, ZwpTextInputV3},
+};
+use wayland_protocols::wp::viewporter::client::{
+    wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
 
 use crate::a11y::A11y;
@@ -60,6 +68,12 @@ pub fn run(cfg: Config) -> Result<(), String> {
     if ime_manager.is_none() {
         eprintln!("hayu: text-input-v3 is not offered; IME support is off");
     }
+    let viewporter: Option<WpViewporter> = globals.bind(&qh, 1..=1, NoEvents).ok();
+    let fractional: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, NoEvents).ok();
+    let fractional = fractional.filter(|_| viewporter.is_some());
+    if fractional.is_none() {
+        eprintln!("hayu: fractional-scale/viewporter not offered; using integer buffer scale");
+    }
 
     let theme = Theme::from_config(&cfg.appearance.mode, &cfg.appearance.accent);
     let mut fonts = FontSystem::new();
@@ -81,6 +95,8 @@ pub fn run(cfg: Config) -> Result<(), String> {
         seat_state,
         keyboard: None,
         ime_manager,
+        viewporter,
+        fractional,
         ime: None,
         loop_handle: loop_handle.clone(),
         cfg,
@@ -195,6 +211,42 @@ fn duration_to_next_minute() -> Duration {
     Duration::from_millis(60_000 - elapsed as u64 + 20)
 }
 
+/// Marker user data for globals whose objects emit no events we handle.
+pub(crate) struct NoEvents;
+
+/// Which surface a fractional-scale object belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScaleTarget {
+    Bar(u32),
+    Launcher,
+}
+
+/// Pixel size of a logical length at a possibly fractional scale.
+pub(crate) fn pixel_size(logical: u32, scale: f32) -> u32 {
+    ((logical as f32) * scale).round().max(1.0) as u32
+}
+
+/// Buffer scale and viewport destination for the next commit. With fractional
+/// scale the buffer is presented at integer scale 1 and the viewport maps it
+/// onto the logical size; otherwise the integer buffer scale is used.
+pub(crate) fn apply_scale(
+    surface: &wl_surface::WlSurface,
+    viewport: Option<&WpViewport>,
+    logical_width: u32,
+    logical_height: u32,
+    scale: f32,
+) {
+    match viewport {
+        Some(viewport) => {
+            surface.set_buffer_scale(1);
+            viewport.set_destination(logical_width as i32, logical_height as i32);
+        }
+        None => {
+            surface.set_buffer_scale(scale.round().max(1.0) as i32);
+        }
+    }
+}
+
 struct Bar {
     output: wl_output::WlOutput,
     // Must drop before `layer`: the EGL surface wraps `layer`'s wl_surface.
@@ -204,7 +256,11 @@ struct Bar {
     width: u32,
     height: u32,
     bottom: bool,
-    scale: i32,
+    /// Pixels per logical unit: the fractional preferred scale when the
+    /// compositor offers it, otherwise the output's integer scale.
+    scale: f32,
+    fractional: Option<WpFractionalScaleV1>,
+    viewport: Option<WpViewport>,
     configured: bool,
 }
 
@@ -233,6 +289,8 @@ pub struct State {
     seat_state: SeatState,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     ime_manager: Option<ZwpTextInputManagerV3>,
+    viewporter: Option<WpViewporter>,
+    fractional: Option<WpFractionalScaleManagerV1>,
     ime: Option<Ime>,
     loop_handle: LoopHandle<'static, State>,
     cfg: Config,
@@ -445,7 +503,7 @@ impl State {
             .output_state
             .info(&output)
             .map(|info| info.scale_factor)
-            .unwrap_or(1);
+            .unwrap_or(1) as f32;
         // Refresh on every open so an application installed since startup can
         // be launched without restarting the shell.
         self.launcher.set_entries(desktop::scan());
@@ -457,6 +515,8 @@ impl State {
                 &self.qh,
                 &output,
                 scale,
+                self.fractional.as_ref(),
+                self.viewporter.as_ref(),
             ) {
                 Ok(surface) => self.launcher.show(surface),
                 Err(error) => {
@@ -534,7 +594,7 @@ impl State {
             .launcher
             .surface
             .as_ref()
-            .map_or(1, |surface| surface.scale) as f32;
+            .map_or(1.0, |surface| surface.scale);
         let x = (launcher::PAD + render::text_width(&mut self.fonts, query, launcher::INPUT_SIZE))
             / scale;
         (
@@ -764,6 +824,15 @@ impl State {
             .unwrap_or(1)
             .max(1);
         let surface = self.compositor.create_surface(&self.qh);
+        let output_id = output.id().protocol_id();
+        // Both objects must exist before the surface's first commit.
+        let fractional = self.fractional.as_ref().map(|manager| {
+            manager.get_fractional_scale(&surface, &self.qh, ScaleTarget::Bar(output_id))
+        });
+        let viewport = self
+            .viewporter
+            .as_ref()
+            .map(|viewporter| viewporter.get_viewport(&surface, &self.qh, NoEvents));
         let layer = self.layer_shell.create_layer_surface(
             &self.qh,
             surface,
@@ -783,7 +852,7 @@ impl State {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.commit();
         self.bars.insert(
-            output.id().protocol_id(),
+            output_id,
             Bar {
                 output,
                 layer,
@@ -792,7 +861,9 @@ impl State {
                 width: scale as u32 * 256,
                 height,
                 bottom: self.cfg.bar.position == "bottom",
-                scale,
+                scale: scale as f32,
+                fractional,
+                viewport,
                 configured: false,
             },
         );
@@ -864,13 +935,13 @@ fn draw_bar(
     if !bar.configured || bar.width == 0 || bar.height == 0 {
         return;
     }
-    let scale = bar.scale.max(1);
-    let width = bar.width.saturating_mul(scale as u32);
-    let height = bar.height.saturating_mul(scale as u32);
+    let scale = bar.scale.max(1.0);
+    let width = pixel_size(bar.width, scale);
+    let height = pixel_size(bar.height, scale);
     let scene = Scene {
         width,
         height,
-        scale: scale as f32,
+        scale,
         theme,
         clock,
         title,
@@ -881,7 +952,7 @@ fn draw_bar(
         return;
     };
     let surface = bar.layer.wl_surface();
-    let _ = bar.layer.set_buffer_scale(scale as u32);
+    apply_scale(surface, bar.viewport.as_ref(), bar.width, bar.height, scale);
     if bar.presenter.is_none() {
         let surface_ptr = surface.id().as_ptr() as *mut c_void;
         match GlPresenter::new(display_ptr, surface_ptr, width, height) {
@@ -912,7 +983,7 @@ impl CompositorHandler for State {
             .surface
             .as_ref()
             .is_some_and(|launcher| launcher.layer.wl_surface() == surface)
-            && self.launcher.set_scale(factor)
+            && self.launcher.set_output_scale(factor)
         {
             self.draw_launcher();
         }
@@ -920,8 +991,9 @@ impl CompositorHandler for State {
             .bars
             .values_mut()
             .find(|bar| bar.layer.wl_surface() == surface)
+            && bar.fractional.is_none()
         {
-            bar.scale = factor.max(1);
+            bar.scale = factor.max(1) as f32;
         }
         self.draw_all();
     }
@@ -988,12 +1060,14 @@ impl OutputHandler for State {
     ) {
         if let Some(info) = self.output_state.info(&output) {
             if self.launcher.output_id() == Some(output.id().protocol_id())
-                && self.launcher.set_scale(info.scale_factor)
+                && self.launcher.set_output_scale(info.scale_factor)
             {
                 self.draw_launcher();
             }
             if let Some(bar) = self.bars.get_mut(&output.id().protocol_id()) {
-                bar.scale = info.scale_factor.max(1);
+                if bar.fractional.is_none() {
+                    bar.scale = info.scale_factor.max(1) as f32;
+                }
             } else if self.bar_wanted(info.name.as_deref()) {
                 // `new_output` can run before the name is known, so a filtered
                 // bar may only become eligible here.
@@ -1245,6 +1319,71 @@ impl Dispatch<ZwpTextInputV3, ()> for State {
     }
 }
 
+impl Dispatch2<WpFractionalScaleV1, State> for ScaleTarget {
+    fn event(
+        &self,
+        state: &mut State,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        let wp_fractional_scale_v1::Event::PreferredScale { scale } = event else {
+            return;
+        };
+        let scale = (scale as f32 / 120.0).max(1.0);
+        match *self {
+            ScaleTarget::Bar(id) => {
+                let Some(bar) = state.bars.get_mut(&id) else {
+                    return;
+                };
+                if (bar.scale - scale).abs() < 0.001 {
+                    return;
+                }
+                bar.scale = scale;
+                state.draw_all();
+            }
+            ScaleTarget::Launcher => {
+                if state.launcher.set_scale(scale) {
+                    state.draw_launcher();
+                }
+            }
+        }
+    }
+}
+impl Dispatch2<WpViewport, State> for NoEvents {
+    fn event(
+        &self,
+        _: &mut State,
+        _: &WpViewport,
+        _: <WpViewport as Proxy>::Event,
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+    }
+}
+impl Dispatch2<WpViewporter, State> for NoEvents {
+    fn event(
+        &self,
+        _: &mut State,
+        _: &WpViewporter,
+        _: <WpViewporter as Proxy>::Event,
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+    }
+}
+impl Dispatch2<WpFractionalScaleManagerV1, State> for NoEvents {
+    fn event(
+        &self,
+        _: &mut State,
+        _: &WpFractionalScaleManagerV1,
+        _: <WpFractionalScaleManagerV1 as Proxy>::Event,
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+    }
+}
 impl ProvidesRegistryState for State {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state

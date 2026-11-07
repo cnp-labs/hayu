@@ -26,7 +26,7 @@ libc = "0.2"
 toml = "1"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 xkbcommon = "0.8"
 accesskit = "0.25"
 accesskit_unix = "0.24"

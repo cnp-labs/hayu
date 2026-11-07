@@ -9,6 +9,13 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{protocol::wl_output, Proxy, QueueHandle};
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    wp_fractional_scale_v1::WpFractionalScaleV1,
+};
+use wayland_protocols::wp::viewporter::client::{
+    wp_viewport::WpViewport, wp_viewporter::WpViewporter,
+};
 
 use crate::bar::State;
 use crate::desktop::{self, Entry};
@@ -31,7 +38,10 @@ pub struct Surface {
     pub output_id: u32,
     pub width: u32,
     pub height: u32,
-    pub scale: i32,
+    /// Pixels per logical unit; fractional when the compositor offers it.
+    pub scale: f32,
+    fractional: Option<WpFractionalScaleV1>,
+    viewport: Option<WpViewport>,
     pub configured: bool,
 }
 
@@ -41,9 +51,17 @@ impl Surface {
         shell: &LayerShell,
         qh: &QueueHandle<State>,
         output: &wl_output::WlOutput,
-        scale: i32,
+        scale: f32,
+        fractional_manager: Option<&WpFractionalScaleManagerV1>,
+        viewporter: Option<&WpViewporter>,
     ) -> Result<Self, String> {
         let surface = compositor.create_surface(qh);
+        // Both objects must exist before the surface's first commit.
+        let fractional = fractional_manager.map(|manager| {
+            manager.get_fractional_scale(&surface, qh, crate::bar::ScaleTarget::Launcher)
+        });
+        let viewport = viewporter
+            .map(|viewporter| viewporter.get_viewport(&surface, qh, crate::bar::NoEvents));
         let layer = shell.create_layer_surface(
             qh,
             surface,
@@ -64,7 +82,9 @@ impl Surface {
             output_id: output.id().protocol_id(),
             width: WIDTH,
             height: HEIGHT,
-            scale: scale.max(1),
+            scale: scale.max(1.0),
+            fractional,
+            viewport,
             configured: false,
         })
     }
@@ -242,11 +262,23 @@ impl Launcher {
         true
     }
 
-    pub fn set_scale(&mut self, scale: i32) -> bool {
+    /// Fractional or integer scale from the compositor's own signal.
+    pub fn set_scale(&mut self, scale: f32) -> bool {
         let Some(surface) = &mut self.surface else {
             return false;
         };
-        surface.scale = scale.max(1);
+        surface.scale = scale.max(1.0);
+        true
+    }
+    /// Integer output scale, used only when fractional scale is unavailable.
+    pub fn set_output_scale(&mut self, scale: i32) -> bool {
+        let Some(surface) = &mut self.surface else {
+            return false;
+        };
+        if surface.fractional.is_some() {
+            return false;
+        }
+        surface.scale = scale.max(1) as f32;
         true
     }
 
@@ -339,10 +371,16 @@ impl Launcher {
         ) else {
             return;
         };
-        let width = surface.width.saturating_mul(surface.scale as u32);
-        let height = surface.height.saturating_mul(surface.scale as u32);
+        let width = crate::bar::pixel_size(surface.width, surface.scale);
+        let height = crate::bar::pixel_size(surface.height, surface.scale);
         let wl_surface = surface.layer.wl_surface();
-        let _ = surface.layer.set_buffer_scale(surface.scale as u32);
+        crate::bar::apply_scale(
+            wl_surface,
+            surface.viewport.as_ref(),
+            surface.width,
+            surface.height,
+            surface.scale,
+        );
         if surface.presenter.is_none() {
             let surface_ptr = wl_surface.id().as_ptr() as *mut c_void;
             match GlPresenter::new(display_ptr, surface_ptr, width, height) {
@@ -372,13 +410,13 @@ pub fn draw_frame(
     error: Option<&str>,
     width: u32,
     height: u32,
-    scale: i32,
+    scale: f32,
     fonts: &mut FontSystem,
     atlas: &mut Atlas,
 ) -> Option<Frame> {
-    let scale = scale.max(1) as f32;
-    let pixel_width = width.saturating_mul(scale as u32);
-    let pixel_height = height.saturating_mul(scale as u32);
+    let scale = scale.max(1.0);
+    let pixel_width = crate::bar::pixel_size(width, scale);
+    let pixel_height = crate::bar::pixel_size(height, scale);
     atlas.start_frame();
     let mut frame = Frame::new(pixel_width, pixel_height, theme.bg)?;
     if fonts.db().is_empty() {
@@ -567,7 +605,7 @@ mod tests {
         let mut fonts = FontSystem::new();
         let mut atlas = Atlas::new();
         let frame = draw_frame(
-            &theme, "fi", "", &results, 0, None, WIDTH, HEIGHT, 2, &mut fonts, &mut atlas,
+            &theme, "fi", "", &results, 0, None, WIDTH, HEIGHT, 2.0, &mut fonts, &mut atlas,
         )
         .expect("launcher frame");
         let pixmap = render::rasterize(&frame, &atlas).expect("launcher pixels");
@@ -584,6 +622,34 @@ mod tests {
         write_ppm("/tmp/hayu-launcher.ppm", &pixmap);
     }
 
+    #[test]
+    fn fractional_scale_sizes_the_frame_in_pixels() {
+        assert_eq!(crate::bar::pixel_size(WIDTH, 1.5), 840);
+        assert_eq!(crate::bar::pixel_size(HEIGHT, 1.5), 630);
+        assert_eq!(crate::bar::pixel_size(1366, 1.25), 1708);
+        assert_eq!(crate::bar::pixel_size(32, 1.5), 48);
+        assert_eq!(crate::bar::pixel_size(1, 1.5), 2);
+        let theme = Theme::from_config("dark", "#8AB4F8");
+        let mut fonts = FontSystem::new();
+        let mut atlas = Atlas::new();
+        let frame = draw_frame(
+            &theme,
+            "fi",
+            "",
+            &[],
+            0,
+            None,
+            WIDTH,
+            HEIGHT,
+            1.5,
+            &mut fonts,
+            &mut atlas,
+        )
+        .expect("launcher frame at 1.5");
+        assert_eq!((frame.width, frame.height), (840, 630));
+        let pixmap = render::rasterize(&frame, &atlas).expect("launcher pixels at 1.5");
+        assert_eq!((pixmap.width(), pixmap.height()), (840, 630));
+    }
     fn write_ppm(path: &str, pixmap: &tiny_skia::Pixmap) {
         let mut file = std::fs::File::create(path).expect("create ppm");
         write!(file, "P6\n{} {}\n255\n", pixmap.width(), pixmap.height()).unwrap();
