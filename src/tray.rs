@@ -4,18 +4,22 @@
 //! Deliberately small: no context menus, no scroll, no NewIcon/NewTitle
 //! signals. An item's icon and title are read when it registers and when its
 //! bus name disappears. Another host is never displaced.
-use std::io::Cursor;
+use futures_lite::StreamExt;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use zbus::fdo::{NameOwnerChanged, RequestNameFlags, RequestNameReply};
 use zbus::message::Header;
-use futures_lite::StreamExt;
 use zbus::{Connection, MatchRule, Proxy, interface};
 
 pub const WATCHER_NAME: &str = "org.kde.StatusNotifierWatcher";
 pub const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 pub const ITEM_INTERFACE: &str = "org.kde.StatusNotifierItem";
 const DEFAULT_ITEM_PATH: &str = "/StatusNotifierItem";
+const MAX_ITEMS: usize = 64;
+const MAX_ICON_DIM: u32 = 512;
+const MAX_ICON_BYTES: usize = MAX_ICON_DIM as usize * MAX_ICON_DIM as usize * 4;
+const MAX_PNG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrayItem {
@@ -70,7 +74,7 @@ async fn run(tx: calloop::channel::Sender<Event>) -> Result<(), String> {
             "another StatusNotifier host owns {WATCHER_NAME}; tray disabled"
         ));
     }
-    let (cmd_tx, cmd_rx) = async_channel::unbounded::<Command>();
+    let (cmd_tx, cmd_rx) = async_channel::bounded::<Command>(MAX_ITEMS);
     let registered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     conn.object_server()
         .at(
@@ -109,9 +113,14 @@ async fn run(tx: calloop::channel::Sender<Event>) -> Result<(), String> {
         match incoming {
             Incoming::Command(Some(Command::Register { service, bus })) => {
                 if let Some(item) = read_item(&conn, &service, &bus).await {
-                    items.retain(|known| known.service != item.service);
-                    items.push(item);
-                    changed = true;
+                    let already_known = items.iter().any(|known| same_destination(known, &item));
+                    if !already_known && items.len() >= MAX_ITEMS {
+                        eprintln!("hayu: tray item limit reached; ignoring {service}");
+                    } else {
+                        items.retain(|known| !same_destination(known, &item));
+                        items.push(item);
+                        changed = true;
+                    }
                 }
             }
             Incoming::Command(None) => break,
@@ -130,7 +139,8 @@ async fn run(tx: calloop::channel::Sender<Event>) -> Result<(), String> {
             Incoming::Change(None) => break,
         }
         if changed {
-            *registered.lock().unwrap() = items.iter().map(|item| item.service.clone()).collect();
+            *registered.lock().unwrap() =
+                items.iter().map(|item| item.registered.clone()).collect();
             let snapshot: Vec<TrayItem> = items
                 .iter()
                 .enumerate()
@@ -151,6 +161,9 @@ async fn run(tx: calloop::channel::Sender<Event>) -> Result<(), String> {
 }
 
 struct Item {
+    /// The exact argument the item registered with, for the watcher list.
+    registered: String,
+    /// Canonical bus name for activation; never a path or `bus/path`.
     service: String,
     bus: String,
     path: String,
@@ -169,16 +182,23 @@ struct Watcher {
 
 #[interface(name = "org.kde.StatusNotifierWatcher")]
 impl Watcher {
-    async fn register_status_notifier_item(&self, service: &str, #[zbus(header)] header: Header<'_>) {
+    async fn register_status_notifier_item(
+        &self,
+        service: &str,
+        #[zbus(header)] header: Header<'_>,
+    ) {
         let sender = header.sender().map(|name| name.to_string());
         let bus = service_bus(service, sender.as_deref());
-        let _ = self
+        if self
             .commands
-            .send(Command::Register {
+            .try_send(Command::Register {
                 service: service.to_string(),
                 bus,
             })
-            .await;
+            .is_err()
+        {
+            eprintln!("hayu: tray registration queue full or closed; ignoring {service}");
+        }
     }
 
     async fn register_status_notifier_host(&self, service: &str) {
@@ -213,14 +233,25 @@ fn service_bus(service: &str, sender: Option<&str>) -> String {
     }
 }
 
-async fn read_item(conn: &Connection, service: &str, bus: &str) -> Option<Item> {
-    let (bus_name, path) = if service.starts_with('/') {
+/// Canonical bus and object path for one registration. Bare paths belong to
+/// the sender's unique bus name, so identical paths from different senders are
+/// still distinct items.
+fn item_identity(service: &str, bus: &str) -> (String, String) {
+    if service.starts_with('/') {
         (bus.to_string(), service.to_string())
     } else if let Some((name, tail)) = service.split_once('/') {
         (name.to_string(), format!("/{tail}"))
     } else {
         (service.to_string(), DEFAULT_ITEM_PATH.to_string())
-    };
+    }
+}
+
+fn same_destination(left: &Item, right: &Item) -> bool {
+    left.service == right.service && left.path == right.path
+}
+
+async fn read_item(conn: &Connection, service: &str, bus: &str) -> Option<Item> {
+    let (bus_name, path) = item_identity(service, bus);
     let proxy = match Proxy::new(conn, bus_name.as_str(), path.as_str(), ITEM_INTERFACE).await {
         Ok(proxy) => proxy,
         Err(error) => {
@@ -249,7 +280,8 @@ async fn read_item(conn: &Connection, service: &str, bus: &str) -> Option<Item> 
             .and_then(|name| theme_icon(&name)),
     };
     Some(Item {
-        service: service.to_string(),
+        registered: service.to_string(),
+        service: bus_name.clone(),
         bus: bus_name,
         path,
         title,
@@ -257,10 +289,20 @@ async fn read_item(conn: &Connection, service: &str, bus: &str) -> Option<Item> 
     })
 }
 
+fn pixmap_len(width: i32, height: i32) -> Option<usize> {
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    if width == 0 || height == 0 || width > MAX_ICON_DIM as usize || height > MAX_ICON_DIM as usize
+    {
+        return None;
+    }
+    width.checked_mul(height)?.checked_mul(4)
+}
+
 fn pixmap_icon(pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<Icon> {
     let (width, height, data) = pixmaps
         .iter()
-        .filter(|(w, h, data)| *w > 0 && *h > 0 && *h <= 64 && data.len() == (*w * *h * 4) as usize)
+        .filter(|(w, h, data)| pixmap_len(*w, *h) == Some(data.len()))
         .max_by_key(|(width, _, _)| *width)?;
     let mut rgba = Vec::with_capacity(data.len());
     for pixel in data.chunks_exact(4) {
@@ -341,28 +383,56 @@ fn size_from_path(path: &Path) -> Option<u32> {
 }
 
 fn decode_png(path: &Path) -> Option<Icon> {
-    let bytes = std::fs::read(path).ok()?;
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > MAX_PNG_FILE_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PNG_FILE_BYTES).read_to_end(&mut bytes).ok()?;
+    decode_png_bytes(&bytes)
+}
+
+fn decode_png_bytes(bytes: &[u8]) -> Option<Icon> {
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().ok()?;
-    let mut buffer = vec![0; reader.output_buffer_size().unwrap_or(0)];
+    let dimensions = reader.info();
+    if dimensions.width == 0
+        || dimensions.height == 0
+        || dimensions.width > MAX_ICON_DIM
+        || dimensions.height > MAX_ICON_DIM
+    {
+        return None;
+    }
+    let output_len = reader.output_buffer_size()?;
+    if output_len > MAX_ICON_BYTES {
+        return None;
+    }
+    let mut buffer = vec![0; output_len];
     let info = reader.next_frame(&mut buffer).ok()?;
-    let rgba = match info.color_type {
-        png::ColorType::Rgba => buffer[..info.buffer_size()].to_vec(),
-        png::ColorType::Rgb => buffer[..info.buffer_size()]
+    let decoded_len = info.buffer_size();
+    if decoded_len > buffer.len() {
+        return None;
+    }
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => buffer[..decoded_len].to_vec(),
+        png::ColorType::Rgb => buffer[..decoded_len]
             .chunks_exact(3)
             .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
             .collect(),
-        png::ColorType::Grayscale => buffer[..info.buffer_size()]
+        png::ColorType::Grayscale => buffer[..decoded_len]
             .iter()
             .flat_map(|value| [*value, *value, *value, 255])
             .collect(),
-        png::ColorType::GrayscaleAlpha => buffer[..info.buffer_size()]
+        png::ColorType::GrayscaleAlpha => buffer[..decoded_len]
             .chunks_exact(2)
             .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
             .collect(),
         png::ColorType::Indexed => return None,
     };
+    if rgba.len() > MAX_ICON_BYTES {
+        return None;
+    }
     Some(Icon {
         width: info.width,
         height: info.height,
@@ -405,12 +475,30 @@ mod tests {
     }
 
     #[test]
+    fn canonical_identity_separates_senders_and_paths() {
+        let first = item_identity("/StatusNotifierItem", ":1.7");
+        let second = item_identity("/StatusNotifierItem", ":1.8");
+        assert_ne!(first, second);
+
+        let bus = "org.kde.StatusNotifierItem-9-1";
+        assert_ne!(
+            item_identity(&format!("{bus}/StatusNotifierItem"), ""),
+            item_identity(&format!("{bus}/OtherItem"), "")
+        );
+
+        assert_eq!(first, item_identity(":1.7/StatusNotifierItem", ""));
+    }
+
+    #[test]
     fn pixmap_converts_argb_network_order_to_rgba() {
         // One 2x1 image: opaque red, half-transparent blue.
         let pixmaps = [(2, 1, vec![0xFF, 0xFF, 0x00, 0x00, 0x80, 0x00, 0x00, 0xFF])];
         let icon = pixmap_icon(&pixmaps).expect("icon");
         assert_eq!((icon.width, icon.height), (2, 1));
-        assert_eq!(icon.rgba, vec![0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x80]);
+        assert_eq!(
+            icon.rgba,
+            vec![0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x80]
+        );
     }
 
     #[test]
@@ -419,5 +507,45 @@ mod tests {
         assert!(pixmap_icon(&[(0, 2, vec![0; 8])]).is_none());
         assert!(pixmap_icon(&[(2, 2, vec![0; 4])]).is_none());
         assert!(theme_icon("hayu-no-such-icon-name").is_none());
+    }
+
+    #[test]
+    fn huge_or_oversized_pixmaps_are_ignored_without_panicking() {
+        assert!(pixmap_len(i32::MAX, i32::MAX).is_none());
+        assert!(pixmap_icon(&[(i32::MAX, i32::MAX, Vec::new())]).is_none());
+        assert!(pixmap_icon(&[(MAX_ICON_DIM as i32 + 1, 1, vec![0; 4])]).is_none());
+        assert!(pixmap_icon(&[(1, MAX_ICON_DIM as i32 + 1, vec![0; 4])]).is_none());
+        assert!(pixmap_icon(&[(-1, 1, vec![0; 4])]).is_none());
+    }
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer
+                .write_image_data(&vec![0; (width * height * 4) as usize])
+                .expect("png data");
+        }
+        bytes
+    }
+
+    #[test]
+    fn png_over_dimension_cap_is_rejected() {
+        assert!(decode_png_bytes(&png_bytes(MAX_ICON_DIM + 1, 1)).is_none());
+        assert!(decode_png_bytes(&png_bytes(1, MAX_ICON_DIM + 1)).is_none());
+        assert!(decode_png_bytes(&png_bytes(4, 4)).is_some());
+    }
+
+    #[test]
+    fn oversized_png_file_is_rejected() {
+        let path =
+            std::env::temp_dir().join(format!("hayu-tray-png-cap-{}.png", std::process::id()));
+        let file = std::fs::File::create(&path).expect("temp png");
+        file.set_len(MAX_PNG_FILE_BYTES + 1).expect("sparse png");
+        assert!(decode_png(&path).is_none());
+        std::fs::remove_file(path).ok();
     }
 }
