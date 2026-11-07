@@ -1,6 +1,8 @@
 # Testing strategy and release gate
 
-Status: plan with a partial M0 suite. `cargo test` runs 43 unit tests covering config validation, Hyprland event parsing, clock formatting, title ellipsization, desktop-entry parsing/dedup/filtering, Exec tokenization, terminal wrapping, control-socket framing and permissions, key mapping, and a rendered launcher frame. The launcher flow was also driven with real key events on the live session (see below). The renderer spike produced offscreen pixel comparisons and live surface checks (ADR-0006). No T-01–T-20 acceptance result exists. Launcher input, IME, scale 2, two outputs and config reload were exercised live (see below); the launcher and reload harnesses are checked in under `../tools/live/`, and the IME run used fcitx5 plus fcitx5-anthy. Screen-reader, soak, fractional scale and mixed per-output scales have not been run.
+Status: partial prototype suite, not V1 acceptance. November 7 refocus validation passes 61 default unit tests and 64 all-feature tests; see [REFOCUS_VALIDATION.md](REFOCUS_VALIDATION.md) for exact commands, warnings and current live coverage. Historical launcher, IME, scaling, output and reload evidence below remains scoped to its recorded revisions/environments; it is not automatically rerun coverage. Harnesses live under `../tools/live/`; renderer evidence remains in ADR-0006. No T-01–T-20 acceptance result or comprehensive screen-reader usability claim exists.
+
+November 7 final live checks: input 15/15, reload 42/42, pointer 7/7 and tray 11/11 pass. A11y suite exits 134 because `/run/user/1000/at-spi/bus_0` is absent; cleanup restored its owned process and original AT setting. This is not an accessibility pass. See [REFOCUS_VALIDATION.md](REFOCUS_VALIDATION.md) and [REFOCUS_MEASUREMENTS.md](REFOCUS_MEASUREMENTS.md).
 
 ## Testing layers
 
@@ -389,7 +391,7 @@ not take the name.
 | A second shell refuses to take the watcher name and the owner stays | Live pass |
 | Killing fcitx5 removes the item from the property | Live pass |
 | The shell survives the removal and `hayu quit` exits 0 | Live pass |
-- Rounding: `cargo test` 56/56 (service-name forms, ARGB32 conversion,
+- Related checks: `cargo test` 56/56 (service-name forms, ARGB32 conversion,
   malformed pixmaps, an absent theme icon, and the sprite draw/hit test);
   `pointer-suite.sh` 7/7 and `reload-suite.sh` 42/42 still pass.
 - Limits: no context menu, scroll or secondary activation; `NewIcon`/

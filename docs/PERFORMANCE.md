@@ -1,6 +1,29 @@
 # Performance budgets and measurement
 
-Status: benchmark plan 0.1. **Hayu has no measurements yet. Every figure below is an initial hypothesis, not a performance claim.**
+Status: prototype measurements and benchmark plan. Historical prototype/spike results below are measurements with limited scope; candidate budgets are hypotheses, not achieved performance claims. No full Core, V1 normal or V1 stress benchmark has been completed. The November 7 refocus comparison is recorded separately below.
+
+## November 7 refocus build comparison
+
+Initial binary of `ab9e678` was preserved before rebuild (SHA-256 `35f353fa58b4200c1b3077d381d9bca423cd7fae7c77e2d1d57d359e8bd2d542`), 13,895,120 bytes. Default release at `740569b` is 13,373,488 bytes: 521,632 bytes smaller (3.75%). This is one local unstripped artifact comparison, not installed/package size or runtime memory savings. Production normal/build dependency nodes decrease from 185 to 178 using unique package name/version pairs; optional experiments remain locked but are not default production dependencies.
+
+Before warm no-op build took 0.212 s; final release rebuild after switching features took 120.9 s. These do **not** establish a build-speed improvement: cache/compilation work differs. No clean-build A/B exists. GPU spike builds and short functionality measurements are recorded in [REFOCUS_VALIDATION.md](REFOCUS_VALIDATION.md), not used to reopen ADR-0006. Resource comparison uses the retained `../tools/perf/measure.sh` with the same configuration and preserved original binary; short samples remain prototype evidence, not a V1 profile.
+
+## November 7 runtime comparison
+
+Same Intel Core i3-2120 (4 threads), 15 GiB RAM, Radeon R7 240/340 Oland/amdgpu, Arch/kernel 7.2.14-zen1-1-zen, Hyprland 0.57.1, one HDMI-A-1 1366×768 scale-1 output. Preserved before/after release binaries ran sequentially without builds, on an isolated config and private bus. Each idle run contains three 10-second samples, not three independent startups. See [REFOCUS_MEASUREMENTS.md](REFOCUS_MEASUREMENTS.md) for hashes, raw-artifact paths, exact config/method and failures.
+
+| Metric | Before `ab9e678` | After source `740569b` |
+| --- | --- | --- |
+| Idle CPU ticks, 3 × 10 s at 100 Hz | 0 / 0 / 0 | 0 / 0 / 0 |
+| RSS | 172,980 kB | 172,440–172,452 kB |
+| PSS | 46,505 kB | 46,111–46,124 kB |
+| Threads | 17 | 16 |
+| First observed layer, 50 ms polling | 268 ms | 210 ms |
+| Launcher map / close | 87 / 63 ms | 90 / 62 ms |
+| Debug draw median / max, 11 samples | 5.07 / 25.26 ms | 5.47 / 25.06 ms |
+| Reload command | 9 ms | 6 ms |
+
+These single-run differences do not establish a speed or RAM improvement. Zero ticks means below sample resolution, not zero CPU use. Clock-minute boundaries were not guaranteed in these short windows. GPU activity/memory, wakeups, allocations, input-to-present latency, startup distributions, active-tray resource samples and full V1 profiles remain unavailable. The tray live suite validates behavior only; it is not a tray-resource benchmark. Multi-monitor/fractional/hotplug and IME were not rerun for this refocus. CPU/GL/wgpu offscreen tooling does run, but does not measure desktop GPU utilization.
 
 ## Defining lightweight
 
