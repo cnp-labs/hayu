@@ -200,6 +200,11 @@ impl GlPresenter {
 
 impl Drop for GlPresenter {
     fn drop(&mut self) {
+        // Each output has its own context, so another presenter's context may be
+        // current here; the object names are only valid in this one.
+        if self.context.make_current(&self.surface).is_err() {
+            return;
+        }
         unsafe {
             self.gl.delete_program(self.program);
             self.gl.delete_vertex_array(self.vao);
