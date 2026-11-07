@@ -347,6 +347,31 @@ WAYLAND_DEBUG=1 XDG_CONFIG_HOME=/tmp/... ./target/release/hayu run
 Unit checks in `src/render.rs` cover the layout: `bar_areas_follow_the_configured_modules` puts `clock` in the left area and `workspaces` in the right and asserts their drawn positions, and `crowded_bar_stays_inside_the_frame` draws twelve workspaces plus a long title into a 320-pixel frame and asserts that no rect or glyph leaves the frame. `unknown_bar_widget_is_a_config_error` rejects `netwrk` in `bar.right` with the area path in the message.
 Live check at this commit: `cargo test` 51/51, `tools/live/reload-suite.sh` 42/42. The suite changes `bar.center` and asserts that the reload prints no bar-area restart notice while a `[tray]` change is still reported, and it keeps the geometry, filter and `bar.enabled` checks.
 - What was not observed: a composited screenshot of the new layout, the areas at fractional scale, and pointer or workspace-click behaviour — the bar has no input regions yet.
+### Bar workspace click (November 7, 2026)
+Run at `f266ba9` on Hyprland 0.57.1 with one 1366×768 output at scale 1. The
+bar was started from a temporary `XDG_CONFIG_HOME` with only `workspaces` in
+`bar.left`, two workspaces existed on the focused monitor, and clicks came
+from `zwlr_virtual_pointer_v1` through the `keyin` injector. Pill geometry came
+from a temporary `HAYU_DEBUG_POINTER=1` trace that prints the drawn pills in
+logical coordinates; the click point was the pill's centre.
+| Check | Result |
+| --- | --- |
+| A left click on the pill for workspace 2 focuses workspace 2 | Live pass |
+| A left click on the pill for workspace 1 focuses workspace 1 again | Live pass |
+| A left click on empty bar space leaves the active workspace unchanged | Live pass |
+| The shell survives the clicks and `hayu quit` exits 0 | Live pass |
+- Method: `tools/live/pointer-suite.sh` (7 checks) reads
+  `hyprctl -j activeworkspace` before and after each click, and derives the
+  click point from the drawn pill geometry rather than a hard-coded x.
+- Rounding: `cargo test` 52/52, including `workspace_hit_test_uses_the_drawn_pills`
+  (half-open ranges and logical-to-buffer scaling) and the crowded-frame test
+  now also asserting that no pill leaves the frame. `reload-suite.sh` 42/42
+  still passes.
+- Limits: left click and workspace pills only — scroll, right/middle click and
+  the other widgets are not implemented. One output at integral scale, and the
+  injector needs `zwlr_virtual_pointer_manager_v1` plus a pointer-capable seat.
+  The Lua fallback path is what ran: the config in this session rejects the
+  legacy `dispatch workspace <id>` string.
 ### Terminal fallback arguments (November 5, 2026)
 
 The fallback list is not one invocation: each emulator has its own way to run a

@@ -22,6 +22,7 @@ cargo test                                 # 41 unit tests
 cargo build --release --offline --manifest-path tools/live/keyin/Cargo.toml
 tools/live/input-suite.sh                  # live launcher suite; needs Hyprland
 tools/live/reload-suite.sh                 # live reload suite; needs Hyprland
+tools/live/pointer-suite.sh                # live bar-click suite; needs Hyprland
 ./target/release/hayu-gpu-spike --backend gl --mode offscreen --frames 300 --json
 cargo build --release --features wgpu      # opt-in backend for the spike only
 ```
@@ -115,6 +116,13 @@ support in V1.
 - Keysyms come from the seat's current xkb keymap, which the keyboard handler
   rebuilds on `wl_keyboard.keymap`; never cache key-to-character mappings. A
   runtime layout switch must keep working without a restart.
+- Bar hit testing must reuse the pill rects recorded while drawing the frame
+  (`Frame::pills`), never a second layout pass; `render::pill_at` scales the
+  logical pointer x by the bar's scale before matching.
+- Hyprland 0.57 can run a Lua config, where the legacy `dispatch workspace <id>`
+  request fails; `Hyprland::switch_workspace` falls back to
+  `repl hl.dispatch(hl.dsp.focus({ workspace = <id> }))`. Keep the legacy form
+  first for older releases.
 - The launcher opens on the focused monitor and falls back to the first bar; a
   removed output drops its surface without ending the process.
 - The launcher surface is reused across opens: closing detaches the buffer and

@@ -60,6 +60,7 @@ separate from AT-SPI bus inspection; see TESTING.md.
 
 The bar uses layer-shell and an exclusive zone matching its calculated position/height. The dock must not reserve space that conflicts with the bar. Panels/launcher/toasts/OSD have separate output and focus policies; do not create a full-screen overlay that captures all input by default.
 
+The bar keeps `KeyboardInteractivity::None` but accepts pointer input: the seat's `wl_pointer` is bound, and a left press is hit-tested against the workspace pills recorded in the frame that was drawn. Drawing and hit testing therefore read one list; a click outside those pills is ignored, and the bar has no keyboard focus. Workspace switching goes through `Hyprland::switch_workspace`, which tries the legacy `dispatch workspace <id>` request and falls back to Hyprland 0.57's Lua `repl` form when the config rejects the legacy string.
 Interactive launchers/panels obtain keyboard focus when opened; the bar, wallpaper, toasts, and OSD do not steal it. Escape/dismiss closes panels and releases keyboard interactivity. Test outside-click and popup dismissal against actual surfaces/input regions. Do not use session-lock protocols for ordinary overlays.
 
 When a monitor disappears, cancel its surfaces/targets before later callbacks can use them. Close interactive panels and destroy that output's bar/dock. Subsequent panels follow the focused output by default. Configuration uses output names, which may require adjustment when device names change.
