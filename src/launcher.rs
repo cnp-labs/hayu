@@ -4,11 +4,11 @@ use cosmic_text::FontSystem;
 use smithay_client_toolkit::{
     compositor::CompositorState,
     shell::{
-        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface},
         WaylandSurface,
+        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface},
     },
 };
-use wayland_client::{protocol::wl_output, Proxy, QueueHandle};
+use wayland_client::{Proxy, QueueHandle, protocol::wl_output};
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
     wp_fractional_scale_v1::WpFractionalScaleV1,
@@ -17,9 +17,9 @@ use wayland_protocols::wp::viewporter::client::{
     wp_viewport::WpViewport, wp_viewporter::WpViewporter,
 };
 
-use crate::bar::State;
+use crate::app::State;
 use crate::desktop::{self, Entry};
-use crate::render::{self, gl::GlPresenter, Atlas, Frame, Theme};
+use crate::render::{self, Atlas, Frame, Theme, gl::GlPresenter};
 
 pub const WIDTH: u32 = 560;
 pub const HEIGHT: u32 = 420;

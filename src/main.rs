@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use hayu::{bar, config, doctor, ipc};
+use hayu::{app, config, doctor, ipc};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -79,7 +79,7 @@ fn run() -> ExitCode {
         );
         config::Config::default()
     };
-    match bar::run(cfg) {
+    match app::run(cfg) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("hayu: {err}");

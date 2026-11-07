@@ -1,4 +1,5 @@
 pub mod a11y;
+pub mod app;
 pub mod bar;
 pub mod config;
 pub mod desktop;
