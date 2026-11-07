@@ -17,6 +17,10 @@ Baseline date: November 2, 2026. This document distinguishes user decisions from
 | D-09 | English for all Markdown files and documentation | User's subsequent language request |
 | D-10 | Text input through `zwp_text_input_v3`, with the keysym path kept as the permanent fallback | ADR-0007; HAYU-003, HAYU-015 |
 
+## November 7, 2026 refocus
+
+D-11 (user-decided): prioritize a simple, minimalist, lightweight and responsive desktop shell, not a general-purpose UI framework. Evaluate CPU, RAM, GPU activity and background work in real use. Preserve Rust, Hyprland-first, TOML, GLES/EGL, working features, accessibility and IME. This supersedes conflicting broad-framework ambitions, not D-06's feature categories. Core/optional delivery priorities in [REFOCUS.md](REFOCUS.md) are proposals; no smaller V1 release is approved. Historical ADRs remain unchanged.
+
 ## Baseline proposals not explicitly selected
 
 | ID | Proposal | Evaluation point |

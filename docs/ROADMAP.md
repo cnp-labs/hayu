@@ -2,6 +2,10 @@
 
 Status: proposed work sequence without calendar deadlines. Every user-selected feature category remains required for V1. Contributor count has not been determined.
 
+## November 7 refocus
+
+Prioritize stabilization and measurement of existing bar/launcher/tray slices before expanding service integrations. Keep existing V1 feature commitments and milestone gates; proposed core/optional priorities require product approval ([REFOCUS.md](REFOCUS.md)). This refocus is not milestone closure.
+
 ## Milestones and exit criteria
 
 | Milestone | Deliverables | Exit criteria | Dependencies |

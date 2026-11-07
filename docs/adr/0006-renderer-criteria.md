@@ -99,13 +99,15 @@ tests regardless of the outcome.
 
 ## Results (November 5, 2026)
 
-Spike commit: `df68feb`. Binary: `hayu-gpu-spike`; default build enables only
-the `gl` feature, the wgpu backend is opt-in via `--features wgpu`.
+Spike commit: `df68feb`. Binary: `hayu-gpu-spike`; that revision built CPU/GL
+spike tooling by default and enabled wgpu only via `--features wgpu`.
+Current builds require `--features gpu-spike` for CPU/GL tooling; `wgpu`
+implies that feature. Production GLES is not an optional `gl` Cargo feature.
 
 Commands used (release build, same scene for all backends):
 
 ```
-cargo build --release
+cargo build --release --features gpu-spike  # current command; originally default at df68feb
 cargo build --release --features wgpu
 ./target/release/hayu-gpu-spike --backend {cpu|gl|wgpu} --mode offscreen --frames 300 --dump /tmp/x.ppm --json
 ./target/release/hayu-gpu-spike --backend {gl|wgpu} --mode present --frames N --hold S --json

@@ -6,6 +6,8 @@ Document version: 0.1 • Date: November 2, 2026 • Status: planning baseline, 
 
 Hyprland users need everyday desktop components with consistent visuals and behavior. Combining separate applications can require additional configuration and integration. Hayu brings together the bar, launcher, control panels, notifications, media, wallpaper, dock, and clipboard through a single internal Rust-based UI foundation.
 
+Product direction updated November 7, 2026: simple, minimalist, lightweight and responsive desktop shell; not a general-purpose UI framework. Existing V1 categories remain requirements pending explicit product decisions. See [REFOCUS.md](REFOCUS.md) for proposed delivery priorities and implementation boundaries.
+
 Motto: **Lightweight desktop shell.** “Lightweight” means measurable resource use, limited idle work, and disabled modules releasing their dedicated work and resources. Rust alone is not evidence of performance.
 
 ## 2. Users and goals

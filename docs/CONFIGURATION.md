@@ -1,6 +1,6 @@
 # Configuration, state, and IPC
 
-Status: **schema v1 design**. `hayu config check` validates the schema today; only bar/clock/appearance keys affect a running process, and no other module exists yet. TOML is user-decided; the keys/defaults below are baseline proposals. Full example: [examples/config.toml](../examples/config.toml).
+Status: **schema v1 design**. `hayu config check` validates the schema today; bar/clock/appearance, launcher enablement and minimal tray startup have consumers. Many other keys still describe unimplemented modules. TOML is user-decided; the keys/defaults below are baseline proposals. Full example: [examples/config.toml](../examples/config.toml).
 
 ## Locations and precedence
 
@@ -28,8 +28,8 @@ Initial precedence: built-in defaults → one TOML config → supported CLI argu
 | appearance.reduce_motion | bool `false` | Overrides animations when true |
 | bar.enabled/position/height | true / `top` / 32 | `top` or `bottom`; height 24–96 logical pixels |
 | bar.outputs | string array `["*"]` | All-output wildcard or exact output names |
-| bar.left/center/right | widget ID arrays | IDs from `BAR_MODULES`; an unknown ID is a config error. `workspaces`, `clock` and `active_window` draw; the other IDs are accepted and draw nothing until their module exists |
-| clock.format | string `%H:%M` | Contract uses a strftime subset; local session timezone |
+| bar.left/center/right | widget ID arrays | IDs from `BAR_MODULES`; an unknown ID is a config error. `workspaces`, `clock`, `active_window` and available tray icons draw; the other IDs are accepted and draw nothing until their module exists |
+| clock.format | string `%H:%M` | Implemented subset `%H`, `%M`, `%S`, `%%`; local timezone. Unescaped `%S` schedules second ticks, otherwise minute ticks. No timer when the bar has no clock module; reload reapplies cadence |
 | launcher.enabled/favorites | true / desktop ID array | Mark unknown favorites; never execute as commands |
 | tray.enabled | true | Requires the session bus. Hayu hosts `org.kde.StatusNotifierWatcher` only when no other host owns it; a taken name disables the tray instead of displacing the other host |
 | notifications.enabled/dnd | true / false | Do not forcibly take another owner's name |

@@ -2,6 +2,8 @@
 
 Reviewed for the November 2, 2026 baseline. Rolling documentation URLs may change; pin versions/commits actually used by implementation in compatibility reports and lockfiles.
 
+November 7 technical refocus also audits [Amane at pinned commit `544cbfc`](https://github.com/MystiaFin/amane/tree/544cbfc23af37f84ac237cd9bec53173981772b3). See [AMANE.md](AMANE.md) for source links, suitable/unsuitable patterns and license boundaries. No code/assets were reused and no dependency added.
+
 ## Inspiration and reviewed sources
 
 | Source | Purpose |

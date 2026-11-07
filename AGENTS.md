@@ -4,7 +4,7 @@ Hayu is a Rust Wayland desktop shell for Hyprland. The repository holds the V1
 planning baseline (Markdown is the specification) plus an **M0 prototype**
 in `src/`: one layer-shell bar, a keyboard launcher reachable over a local
 control socket, `hayu config check`, `hayu doctor`, and a renderer spike binary.
-There is no V1 feature beyond the bar and launcher, and no packaging or CI. The
+Implemented slices include the bar, launcher and minimal tray; V1 remains incomplete, with no packaging or CI. The November 7 refocus prioritizes a simple, minimalist, lightweight and responsive desktop shell, not a general UI framework (docs/REFOCUS.md). Existing V1 categories remain until explicit product approval changes them. The
 renderer is decided: GLES/EGL with glow, CPU path for tests only (ADR-0006);
 both surfaces draw through it.
 
@@ -12,7 +12,7 @@ both surfaces draw through it.
 
 ```
 cargo build --release
-cargo test                                 # 41 unit tests
+cargo test                                 # production/reference unit tests
 ./target/release/hayu doctor               # works without a shell running
 ./target/release/hayu config check examples/config.toml
 ./target/release/hayu run                  # needs a live Hyprland session
@@ -24,6 +24,7 @@ tools/live/input-suite.sh                  # live launcher suite; needs Hyprland
 tools/live/reload-suite.sh                 # live reload suite; needs Hyprland
 tools/live/pointer-suite.sh                # live bar-click suite; needs Hyprland
 tools/live/tray-suite.sh                   # live tray suite; private dbus, fcitx5, Hyprland
+cargo build --release --features gpu-spike  # CPU/GL experiment, not default build
 ./target/release/hayu-gpu-spike --backend gl --mode offscreen --frames 300 --json
 cargo build --release --features wgpu      # opt-in backend for the spike only
 ```
@@ -82,8 +83,11 @@ support in V1.
 - cosmic-text: calling `FontSystem::db_mut()` per frame invalidates its font
   caches and turned one bar draw from 0.8 ms into 36 ms. Use `db()` for
   read-only checks; only mutate the database at startup.
-- Redraw must stay event-driven. The bar draws on Hyprland events, configure,
-  and the exact minute tick; do not add a frame loop or per-widget polling.
+- Redraw must stay event-driven. `src/app.rs` coalesces bar invalidation once
+  per calloop dispatch cycle; `src/bar.rs` owns bar surfaces and drawing.
+  The clock uses aligned second ticks only for unescaped `%S`, otherwise
+  minute ticks, and no timer without a clock module. Do not add a frame loop
+  or per-widget polling.
 - The Hyprland adapter owns both sockets; widgets must not talk to them
   directly. Reconnects request a resync before trusting state again.
 - Hyprland sends text-input `enter` only when an input method is registered
@@ -146,8 +150,9 @@ support in V1.
 - GL backend: every output owns an EGL context, so `make_current` before each
   draw is mandatory; skipping it crashed the second output with
   "argument does not name a valid surface" only after a hotplug.
-- The wgpu backend is compiled out unless `--features wgpu`; default builds must
-  keep working with the `gl` feature only.
+- Production GLES is always available; there is no `gl` Cargo feature. GPU
+  spike modules require `gpu-spike`; `wgpu` implies it and adds only the
+  experimental wgpu backend. Default builds must work without either feature.
 - Renderer evidence lives in ADR-0006; do not restate its PSS/latency numbers as
   V1 profile results.
 
@@ -166,7 +171,7 @@ support in V1.
 ## Where to start reading
 
 `README.md` → `docs/PRD.md` → `docs/SCOPE.md` → `docs/DECISIONS.md` → `docs/ROADMAP.md` for intent;
-`src/main.rs` → `src/bar.rs` → `src/hyprland.rs` for the code,
+`src/main.rs` → `src/app.rs` → `src/bar.rs` → `src/hyprland.rs` for the code,
 `src/launcher.rs` → `src/desktop.rs` → `src/ipc.rs` for the launcher slice,
 `src/gpu/` for the renderer spike; `docs/adr/` for the reasoning behind locked
 choices.

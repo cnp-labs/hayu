@@ -26,7 +26,7 @@ Service state uses `unavailable`, `connecting`, `ready`, `degraded`, and `error`
 
 ## 3. Threads, event loop, and backpressure
 
-One UI thread owns Wayland dispatch, the UI tree, and renderer resources. Large file operations, thumbnails, decoding, indexing, and blocking work run on workers. Choose the final executor/event loop in M0; evaluate candidate calloop/async integration by wakeups and lifecycle rather than framework count.
+One UI thread owns Wayland dispatch, the UI tree, and renderer resources. Large file operations, thumbnails, decoding, indexing, and blocking work run on workers. The prototype uses calloop with worker channels. The following worker/backpressure rules are intended contracts, not proof that every current path is nonblocking: Hyprland snapshot/query/dispatch still includes synchronous UI calls, and launcher catalogue scans still run when opening.
 
 Queues have explicit limits and policies. Volume/workspace state updates may coalesce to the latest value; user actions and surface lifecycle events must not be silently dropped. Do not hold state locks while awaiting IO. Worker results carry generation IDs so stale results after reload cannot replace newer data. Shutdown cancels work, closes channels, and releases handles.
 
@@ -36,10 +36,10 @@ Frame phases: apply events/update → measure/layout if geometry changed → ren
 
 Each output tracks logical size, scale, transform, buffer size, and resource generation. Hit testing uses logical coordinates; visual clips match hit regions. Scale comes from `wp_fractional_scale_v1` when it and `wp_viewporter` are both offered: the fractional object and a `wp_viewport` are created before the surface's first commit, the surface keeps `wl_surface.buffer_scale` at 1, the viewport destination is the logical size, and the buffer is `round(logical × preferred_scale/120)`. Without them the output's integer scale sets `buffer_scale` and no viewport is used, and the shell logs that limitation once. Integer output-scale events are ignored while a fractional object owns the surface. Scale changes invalidate related text/geometry caches. Hidden surfaces without animation needs do not continuously request frames.
 
-The renderer is GLES/EGL with glow ([ADR-0006](adr/0006-renderer-criteria.md)). `src/render.rs` owns the backend-neutral interface: a `Frame` is a clear colour plus solid rects and glyph quads, and an `Atlas` rasterizes a glyph the first time it is drawn and reuses it afterwards. Text is shaped and rasterized during frame construction, never by a backend.
+The renderer is GLES/EGL with glow ([ADR-0006](adr/0006-renderer-criteria.md)). `src/render.rs` owns the backend-neutral interface: a `Frame` is a clear colour plus solid rects, RGBA sprite quads and glyph quads, and an `Atlas` rasterizes a glyph the first time it is drawn and reuses it afterwards. Text is shaped and rasterized during frame construction, never by a backend.
 `src/render/gl.rs` presents a frame on one layer surface: one EGL context and window surface per output, `make_current` before every draw because outputs do not share a context, a dynamic vertex buffer rebuilt from the frame, a full atlas upload only when its version changed, and `swap_buffers` as the surface commit. The EGL window surface follows the frame's pixel size, so a fractional preferred scale only changes that size and the viewport destination. Surfaces own their atlas and presenter, and the presenter drops before the layer surface whose `wl_surface` it wraps.
 `render::build` lays the bar out from `bar.left`, `bar.center` and `bar.right` at draw time, so a reload re-applies the module lists without a restart. The centre area is measured first and starts at the frame's centre; the side areas get the room left over. A module that does not fit is dropped rather than allowed to overflow: workspaces stop at the first pill that does not fit, the title is ellipsized, and a clock or title that still does not fit is skipped. Config validation rejects IDs outside `BAR_MODULES`; IDs whose module does not exist yet draw nothing.
-`render::rasterize` is the reference implementation for tests: it consumes the same frame and atlas and returns a pixmap. It is not a user-selectable fallback; a second production backend is not promised for V1. No frame loop is added: frames are still built only from events, configure and the minute tick.
+`render::rasterize` is the reference implementation for tests: it consumes the same frame and atlas and returns a pixmap. It is not a user-selectable fallback; a second production backend is not promised for V1. `src/gpu/` and the spike binary require `gpu-spike` (or `wgpu`, which implies it); tiny-skia is available only to tests/spike. No frame loop is added. `src/app.rs` owns application lifecycle, input and service integration; `src/bar.rs` owns per-output bar surface resources and drawing. Bar events mark dirty state, flushed once after a calloop dispatch cycle, so multiple events in that cycle share a draw. This is not compositor frame-callback pacing. Clock timers align to the next second for unescaped `%S`, otherwise the next minute; no clock timer is installed when the configured bar has no clock module. Reload rebuilds the timer cadence immediately. Launcher drawing still follows input/configure events and closing detaches its buffer.
 
 ### Launcher accessibility spike
 
@@ -76,7 +76,12 @@ calloop channel. Nothing is polled. Icons travel as one RGBA strip per draw and
 are uploaded only when the strip version changes; `Frame::tray_hits` records
 the rects that were drawn, and a left click calls `Activate(0,0)` on a detached
 thread. Context menus, scroll and `NewIcon`/`NewTitle` refresh are out of this
-slice.
+slice. Retained tray items and the registration command queue are capped at 64;
+icons are at most 512×512 (1 MiB decoded RGBA), and PNG files at most 4 MiB.
+Invalid/oversized icons are ignored, and a full command queue drops new
+registrations with a diagnostic. These bounds do not cap zbus's incoming
+message allocation or the calloop snapshot queue. Canonical bus/path identity
+keeps distinct path-form registrations separate and targets Activate correctly.
 
 ## 6. Hyprland adapter
 
