@@ -13,6 +13,9 @@ enabled = true
 position = "top"
 height = 32
 outputs = ["*"]
+# Area lists are read on every draw, so `hayu reload` re-lays out the bar.
+# IDs without a module yet (launcher, media, audio, network, battery,
+# tray, notifications, control_center) draw nothing.
 left = ["launcher", "workspaces", "active_window"]
 center = ["clock"]
 right = ["media", "audio", "network", "battery", "tray", "notifications", "control_center"]

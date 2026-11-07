@@ -117,7 +117,7 @@ inferred from the config file alone.
 | Re-enabling the bar maps it again at the configured height | Live pass |
 | A named filter moves the bar onto a matching hotplugged headless output | Live pass |
 | Removing that output removes its bar; restoring `*` maps the bar on the real output | Live pass |
-| A widget-list change still exits 0 and prints `restart required for: bar.left` | Live pass |
+| A widget-list change still exits 0 and prints `restart required for: bar.left` | Superseded by *Bar module areas* (November 7, 2026) |
 | Theme/accent and clock-format change | Applied, no pixel diff |
 
 - Method: `tools/live/reload-suite.sh` (41 checks at `310a7c7`) writes small
@@ -129,7 +129,8 @@ inferred from the config file alone.
 - Limits: one real output and integral scale; the filter check uses a
   temporary headless output, not a second monitor. No screenshot tool, so a
   theme or clock change is only known to have been applied to the state, not
-  confirmed on screen. Widget lists still need a restart.
+  confirmed on screen. Widget lists needed a restart at this commit; they are
+  read at draw time since November 7, 2026.
 - Unit tests cannot reach this path without a Wayland session; the IPC parser
   change (`reload`) is pinned by `parses_and_serializes_requests`.
 
@@ -342,6 +343,10 @@ WAYLAND_DEBUG=1 XDG_CONFIG_HOME=/tmp/... ./target/release/hayu run
 | Scale-1 regression | `input-suite.sh` 15/15, `reload-suite.sh` 41/41, `a11y-suite.py` exit 0, `doctor` exit 0, `config check` exit 0 — at scale 1, which now also draws through the viewport path |
 - What was not observed: a live 1.25 scale (unit test only); the input and reload suites at 1.5 (they ran at scale 1); a composited screenshot; and the integer fallback, because both globals were present.
 - The compositor restarted during this work: `coredumpctl` records a Hyprland 0.57.1 SIGSEGV inside its own cleanup path (`CCompositor::cleanup` → monitor and protocol destructors), its log has no hayu or viewport protocol error, and the suite results above were re-run on the new instance with the new `HYPRLAND_INSTANCE_SIGNATURE`. What requested that shutdown is not visible in the available logs.
+### Bar module areas (November 7, 2026)
+Unit checks in `src/render.rs` cover the layout: `bar_areas_follow_the_configured_modules` puts `clock` in the left area and `workspaces` in the right and asserts their drawn positions, and `crowded_bar_stays_inside_the_frame` draws twelve workspaces plus a long title into a 320-pixel frame and asserts that no rect or glyph leaves the frame. `unknown_bar_widget_is_a_config_error` rejects `netwrk` in `bar.right` with the area path in the message.
+Live check at this commit: `cargo test` 51/51, `tools/live/reload-suite.sh` 42/42. The suite changes `bar.center` and asserts that the reload prints no bar-area restart notice while a `[tray]` change is still reported, and it keeps the geometry, filter and `bar.enabled` checks.
+- What was not observed: a composited screenshot of the new layout, the areas at fractional scale, and pointer or workspace-click behaviour — the bar has no input regions yet.
 ### Terminal fallback arguments (November 5, 2026)
 
 The fallback list is not one invocation: each emulator has its own way to run a

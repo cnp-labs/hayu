@@ -22,6 +22,8 @@ Features are implemented incrementally but remain obligations for the first rele
 | Notifications | Toasts, actions, DND, bounded session history | Disk persistence and online service integrations |
 
 These refinements can be expanded through documented changes. User-selected feature categories must not be removed merely to reduce implementation effort.
+Status: only the bar, launcher search, config validation and `doctor` exist. The bar draws `workspaces`, `clock` and `active_window`; the launcher, media, audio, network, battery, tray, notifications and control_center IDs are validated and draw nothing, so HAYU-001 and HAYU-004 remain incomplete.
+
 
 ## Outside V1
 
