@@ -65,6 +65,19 @@ Interactive launchers/panels obtain keyboard focus when opened; the bar, wallpap
 
 When a monitor disappears, cancel its surfaces/targets before later callbacks can use them. Close interactive panels and destroy that output's bar/dock. Subsequent panels follow the focused output by default. Configuration uses output names, which may require adjustment when device names change.
 
+### Tray
+`src/tray.rs` owns a minimal StatusNotifierItem host on a worker thread. It
+requests `org.kde.StatusNotifierWatcher` with `DoNotQueue`, so when another
+host already owns the name the shell logs it, draws nothing and keeps running.
+Items register through the watcher interface; the worker reads `Title`,
+`IconPixmap` and `IconName` once at registration, drops the item when its bus
+name disappears (`NameOwnerChanged`), and sends the list to the UI through a
+calloop channel. Nothing is polled. Icons travel as one RGBA strip per draw and
+are uploaded only when the strip version changes; `Frame::tray_hits` records
+the rects that were drawn, and a left click calls `Activate(0,0)` on a detached
+thread. Context menus, scroll and `NewIcon`/`NewTitle` refresh are out of this
+slice.
+
 ## 6. Hyprland adapter
 
 Use the request socket for snapshots/actions and the event socket for updates. Open the event stream, buffer events while obtaining the snapshot, reconcile state, then process buffered events. Do not assume a snapshot+stream transaction exists: detect ambiguous state and perform bounded resynchronization. Connection ordering alone does not establish race freedom.

@@ -372,6 +372,32 @@ logical coordinates; the click point was the pill's centre.
   injector needs `zwlr_virtual_pointer_manager_v1` plus a pointer-capable seat.
   The Lua fallback path is what ran: the config in this session rejects the
   legacy `dispatch workspace <id>` string.
+### Tray items, icon and activation (November 7, 2026)
+Run at `2c440da` on Hyprland 0.57.1 with one 1366×768 output at scale 1. The
+real session already has another watcher (noctalia), so the check ran inside
+`dbus-run-session` on a private bus; fcitx5 5.1.23 was the tray application,
+started with a private `XDG_RUNTIME_DIR` whose `wayland-1` symlinks the real
+socket. `tools/live/tray-suite.sh` also starts a second shell to prove it does
+not take the name.
+| Check | Result |
+| --- | --- |
+| fcitx5 starts on the private bus | Live pass |
+| The shell owns `org.kde.StatusNotifierWatcher` | Live pass (`:1.16` in that run) |
+| `RegisteredStatusNotifierItems` lists the fcitx5 item | Live pass (`as 1 ":1.18"`) |
+| The item's icon is drawn with a hit rect | Live pass (`bar tray 0:1338.0:20.0` on a 1366px bar) |
+| A left click on the icon calls `Activate` | Live pass, seen by `dbus-monitor` |
+| A second shell refuses to take the watcher name and the owner stays | Live pass |
+| Killing fcitx5 removes the item from the property | Live pass |
+| The shell survives the removal and `hayu quit` exits 0 | Live pass |
+- Rounding: `cargo test` 56/56 (service-name forms, ARGB32 conversion,
+  malformed pixmaps, an absent theme icon, and the sprite draw/hit test);
+  `pointer-suite.sh` 7/7 and `reload-suite.sh` 42/42 still pass.
+- Limits: no context menu, scroll or secondary activation; `NewIcon`/
+  `NewTitle` are not followed, so an icon that changes in place is stale.
+  SVG-only icon names draw nothing unless the same name exists as a PNG with
+  its `-symbolic` suffix removed. The icon strip keeps the item's source size
+  and is scaled by the sampler. Only fcitx5 was used, on a private bus, so a
+  second real-world tray app and the real session watcher were not exercised.
 ### Terminal fallback arguments (November 5, 2026)
 
 The fallback list is not one invocation: each emulator has its own way to run a

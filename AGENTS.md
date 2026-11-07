@@ -23,6 +23,7 @@ cargo build --release --offline --manifest-path tools/live/keyin/Cargo.toml
 tools/live/input-suite.sh                  # live launcher suite; needs Hyprland
 tools/live/reload-suite.sh                 # live reload suite; needs Hyprland
 tools/live/pointer-suite.sh                # live bar-click suite; needs Hyprland
+tools/live/tray-suite.sh                   # live tray suite; private dbus, fcitx5, Hyprland
 ./target/release/hayu-gpu-spike --backend gl --mode offscreen --frames 300 --json
 cargo build --release --features wgpu      # opt-in backend for the spike only
 ```
@@ -123,6 +124,17 @@ support in V1.
   request fails; `Hyprland::switch_workspace` falls back to
   `repl hl.dispatch(hl.dsp.focus({ workspace = <id> }))`. Keep the legacy form
   first for older releases.
+- The tray host requests `org.kde.StatusNotifierWatcher` with `DoNotQueue`:
+  another host keeps the name and hayu only logs it. Never use
+  `ReplaceExisting`; the helper in `tray-suite.sh` starts a second shell to
+  prove this.
+- Tray icons arrive as `IconPixmap` ARGB32 or a theme PNG; `-symbolic` names
+  are retried without the suffix because they are usually SVG-only. No
+  polling: the worker reacts to registration and `NameOwnerChanged` only, and
+  `Frame::image.version` gates the strip upload.
+- `tools/live/tray-suite.sh` must run on a private bus, because this session's
+  real watcher is noctalia; fcitx5 gets its own `XDG_RUNTIME_DIR` with a
+  `wayland-1` symlink, so it does not collide with the user's input method.
 - The launcher opens on the focused monitor and falls back to the first bar; a
   removed output drops its surface without ending the process.
 - The launcher surface is reused across opens: closing detaches the buffer and
