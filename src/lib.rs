@@ -8,3 +8,4 @@ pub mod hyprland;
 pub mod ipc;
 pub mod launcher;
 pub mod render;
+pub mod tray;

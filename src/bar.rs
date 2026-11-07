@@ -51,6 +51,7 @@ use crate::hyprland::{self, Event, Hyprland, Snapshot, Workspace};
 use crate::ipc::{self, Command as IpcCommand};
 use crate::launcher::{self, Launcher};
 use crate::render::{self, Atlas, Scene, Theme, gl::GlPresenter};
+use crate::tray;
 
 pub fn run(cfg: Config) -> Result<(), String> {
     let conn =
@@ -76,6 +77,10 @@ pub fn run(cfg: Config) -> Result<(), String> {
         eprintln!("hayu: fractional-scale/viewporter not offered; using integer buffer scale");
     }
 
+    let (tray_tx, tray_rx) = calloop::channel::channel::<tray::Event>();
+    if cfg.tray.enabled {
+        tray::spawn(tray_tx);
+    }
     let theme = Theme::from_config(&cfg.appearance.mode, &cfg.appearance.accent);
     let mut fonts = FontSystem::new();
     if fonts.db_mut().is_empty() {
@@ -111,6 +116,8 @@ pub fn run(cfg: Config) -> Result<(), String> {
         title: String::new(),
         clock,
         bars: HashMap::new(),
+        tray_items: Vec::new(),
+        tray_version: 0,
         launcher: Launcher::new(Vec::new()),
         a11y: A11y::new(),
         ipc_path: None,
@@ -169,6 +176,13 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .map_err(|e| format!("cannot insert Hyprland channel: {e}"))?;
     hyprland::spawn_event_thread(tx);
 
+    loop_handle
+        .insert_source(tray_rx, |event, _, state| {
+            if let ChannelEvent::Msg(event) = event {
+                state.handle_tray_event(event);
+            }
+        })
+        .map_err(|e| format!("cannot insert tray channel: {e}"))?;
     let (ipc_tx, ipc_rx) = calloop::channel::channel::<ipc::Job>();
     loop_handle
         .insert_source(ipc_rx, |event, _, state| {
@@ -266,6 +280,8 @@ struct Bar {
     configured: bool,
     /// Workspace pills as last drawn, so a click uses the same geometry.
     pills: Vec<render::Pill>,
+    /// Tray icons as last drawn, with the source item index.
+    tray_hits: Vec<render::TrayHit>,
 }
 
 struct Ime {
@@ -308,6 +324,8 @@ pub struct State {
     title: String,
     clock: String,
     bars: HashMap<u32, Bar>,
+    tray_items: Vec<tray::TrayItem>,
+    tray_version: u32,
     launcher: Launcher,
     a11y: A11y,
     ipc_path: Option<PathBuf>,
@@ -315,6 +333,21 @@ pub struct State {
 }
 
 impl State {
+    fn handle_tray_event(&mut self, event: tray::Event) {
+        match event {
+            tray::Event::Items(items) => {
+                self.tray_items = items;
+                self.tray_version = self.tray_version.wrapping_add(1);
+                self.draw_all();
+            }
+            tray::Event::Disabled(reason) => {
+                eprintln!("hayu: {reason}");
+                self.tray_items.clear();
+                self.tray_version = self.tray_version.wrapping_add(1);
+                self.draw_all();
+            }
+        }
+    }
     fn tick(&mut self) {
         let clock = render::format_clock(&self.cfg.clock.format, Local::now().time());
         if clock != self.clock {
@@ -871,11 +904,25 @@ impl State {
                 viewport,
                 configured: false,
                 pills: Vec::new(),
+                tray_hits: Vec::new(),
             },
         );
     }
 
     fn draw_all(&mut self) {
+        let tray_images: Vec<render::TrayImage> = self
+            .tray_items
+            .iter()
+            .filter_map(|item| {
+                item.icon.as_ref().map(|icon| render::TrayImage {
+                    id: item.id,
+                    width: icon.width,
+                    height: icon.height,
+                    rgba: icon.rgba.clone(),
+                })
+            })
+            .collect();
+        let tray_version = self.tray_version;
         let keys: Vec<u32> = self.bars.keys().copied().collect();
         for key in keys {
             let Some(output) = self.bars.get(&key).map(|bar| bar.output.clone()) else {
@@ -897,6 +944,8 @@ impl State {
                 self.active_workspace,
                 &workspaces,
                 &title,
+                &tray_images,
+                tray_version,
                 &mut self.fonts,
                 self.display_ptr,
             );
@@ -937,6 +986,8 @@ fn draw_bar(
     active_workspace: i64,
     workspaces: &[Workspace],
     title: &str,
+    tray: &[render::TrayImage],
+    tray_version: u32,
     fonts: &mut FontSystem,
     display_ptr: *mut c_void,
 ) {
@@ -961,6 +1012,8 @@ fn draw_bar(
         left: &left,
         center: &center,
         right: &right,
+        tray,
+        tray_version,
     };
     let Some(frame) = render::build(&scene, fonts, &mut bar.atlas) else {
         return;
@@ -973,7 +1026,16 @@ fn draw_bar(
             .collect();
         eprintln!("hayu: bar pills {} ({})", pills.join(" "), bar.width);
     }
+    if std::env::var_os("HAYU_DEBUG_POINTER").is_some() && !frame.tray_hits.is_empty() {
+        let icons: Vec<String> = frame
+            .tray_hits
+            .iter()
+            .map(|hit| format!("{}:{:.1}:{:.1}", hit.id, hit.x / scale, hit.w / scale))
+            .collect();
+        eprintln!("hayu: bar tray {}", icons.join(" "));
+    }
     bar.pills = frame.pills.clone();
+    bar.tray_hits = frame.tray_hits.clone();
     let surface = bar.layer.wl_surface();
     apply_scale(surface, bar.viewport.as_ref(), bar.width, bar.height, scale);
     if bar.presenter.is_none() {
@@ -1207,7 +1269,15 @@ impl State {
         else {
             return;
         };
-        let Some(id) = render::pill_at(&bar.pills, logical_x, bar.scale.max(1.0)) else {
+        let scale = bar.scale.max(1.0);
+        if let Some(item) = render::tray_at(&bar.tray_hits, logical_x, scale)
+            .and_then(|id| self.tray_items.iter().find(|item| item.id == id))
+            .cloned()
+        {
+            tray::activate(&item);
+            return;
+        }
+        let Some(id) = render::pill_at(&bar.pills, logical_x, scale) else {
             return;
         };
         if id == self.active_workspace {
