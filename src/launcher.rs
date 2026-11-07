@@ -379,6 +379,7 @@ pub fn draw_frame(
     let scale = scale.max(1) as f32;
     let pixel_width = width.saturating_mul(scale as u32);
     let pixel_height = height.saturating_mul(scale as u32);
+    atlas.start_frame();
     let mut frame = Frame::new(pixel_width, pixel_height, theme.bg)?;
     if fonts.db().is_empty() {
         return Some(frame);

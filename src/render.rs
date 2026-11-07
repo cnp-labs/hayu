@@ -113,8 +113,9 @@ struct Slot {
 
 /// Dynamic glyph atlas. A glyph is rasterized the first time it is drawn and
 /// then reused by every later frame. One surface's atlas is 1024×1024, which
-/// holds thousands of unique glyphs; the destructive reset on overflow is a
-/// ponytail ceiling, upgrade by growing the texture if a real frame ever hits it.
+/// holds thousands of unique glyphs. When it fills, the rest of that frame skips
+/// new glyphs and the next frame resets once, so no emitted UV is invalidated;
+/// upgrade by growing the texture if skipping ever shows up in practice.
 pub struct Atlas {
     pub width: u32,
     pub height: u32,
@@ -127,6 +128,7 @@ pub struct Atlas {
     pen_x: u32,
     pen_y: u32,
     row_h: u32,
+    frame_glyphs: u32,
 }
 
 const ATLAS_SIZE: u32 = 1024;
@@ -144,7 +146,13 @@ impl Atlas {
             pen_x: PAD,
             pen_y: PAD,
             row_h: 0,
+            frame_glyphs: 0,
         }
+    }
+    /// Marks the start of a frame. A full atlas may only be reset here: glyphs
+    /// already emitted into the current frame hold UVs into the old contents.
+    pub fn start_frame(&mut self) {
+        self.frame_glyphs = 0;
     }
 
     fn slot(&mut self, fonts: &mut FontSystem, key: CacheKey) -> Option<Slot> {
@@ -164,8 +172,13 @@ impl Atlas {
             self.row_h = 0;
         }
         if self.pen_y + h + PAD > self.height {
-            // Full: drop everything and start over rather than grow.
-            self.reset();
+            // Full: reset only between frames, otherwise this frame's earlier
+            // UVs would point at cleared or reused texels.
+            if self.frame_glyphs == 0 {
+                self.reset();
+            } else {
+                return None;
+            }
         }
         if self.pen_y + h + PAD > self.height {
             return None;
@@ -213,11 +226,17 @@ impl Atlas {
         };
         self.pen_x += w + PAD;
         self.row_h = self.row_h.max(h);
+        self.frame_glyphs += 1;
         self.version = self.version.wrapping_add(1);
         self.slots.insert(key, slot);
         Some(slot)
     }
 
+    /// Test hook: pretend the current row ended at the bottom edge.
+    #[cfg(test)]
+    fn force_full(&mut self) {
+        self.pen_y = self.height;
+    }
     fn reset(&mut self) {
         self.pixels.fill(0);
         self.slots.clear();
@@ -336,6 +355,7 @@ pub struct Scene<'a> {
 }
 
 pub fn build(scene: &Scene<'_>, fonts: &mut FontSystem, atlas: &mut Atlas) -> Option<Frame> {
+    atlas.start_frame();
     let mut frame = Frame::new(scene.width, scene.height, scene.theme.bg)?;
 
     if fonts.db().is_empty() {
@@ -364,7 +384,13 @@ pub fn build(scene: &Scene<'_>, fonts: &mut FontSystem, atlas: &mut Atlas) -> Op
         }
         let active = ws.id == scene.active_workspace;
         if active {
-            frame.fill(x, 4.0 * scale, pill, scene.height as f32 - 8.0 * scale, scene.theme.accent);
+            frame.fill(
+                x,
+                4.0 * scale,
+                pill,
+                scene.height as f32 - 8.0 * scale,
+                scene.theme.accent,
+            );
         }
         let color = if active { scene.theme.bg } else { fg };
         frame.text(
@@ -495,19 +521,88 @@ mod tests {
         }
         let mut atlas = Atlas::new();
         let mut frame = Frame::new(120, 32, [0, 0, 0]).unwrap();
-        frame.text(&mut fonts, &mut atlas, "09:41", 4.0, 4.0, 13.0, [255, 255, 255]);
+        frame.text(
+            &mut fonts,
+            &mut atlas,
+            "09:41",
+            4.0,
+            4.0,
+            13.0,
+            [255, 255, 255],
+        );
         let first = frame.glyphs.len();
         assert!(first > 0);
         let version = atlas.version;
         let mut again = Frame::new(120, 32, [0, 0, 0]).unwrap();
-        again.text(&mut fonts, &mut atlas, "09:41", 4.0, 4.0, 13.0, [255, 255, 255]);
+        again.text(
+            &mut fonts,
+            &mut atlas,
+            "09:41",
+            4.0,
+            4.0,
+            13.0,
+            [255, 255, 255],
+        );
         assert_eq!(again.glyphs.len(), first);
-        assert_eq!(atlas.version, version, "second frame reused the cached glyphs");
+        assert_eq!(
+            atlas.version, version,
+            "second frame reused the cached glyphs"
+        );
         let pixmap = rasterize(&again, &atlas).unwrap();
         assert_eq!((pixmap.width(), pixmap.height()), (120, 32));
         assert!(
-            pixmap.data().chunks_exact(4).any(|px| px[3] == 255 && px[0] > 0),
+            pixmap
+                .data()
+                .chunks_exact(4)
+                .any(|px| px[3] == 255 && px[0] > 0),
             "glyphs produced visible coverage"
         );
+    }
+    #[test]
+    fn full_atlas_skips_glyphs_until_the_next_frame() {
+        let mut fonts = FontSystem::new();
+        if fonts.db().is_empty() {
+            return;
+        }
+        let mut atlas = Atlas::new();
+        atlas.start_frame();
+        let mut frame = Frame::new(120, 32, [0, 0, 0]).unwrap();
+        frame.text(&mut fonts, &mut atlas, "A", 4.0, 4.0, 13.0, [255, 255, 255]);
+        assert_eq!(frame.glyphs.len(), 1);
+        let placed = atlas.slots.len();
+        let version = atlas.version;
+        atlas.force_full();
+        frame.text(
+            &mut fonts,
+            &mut atlas,
+            "B",
+            20.0,
+            4.0,
+            13.0,
+            [255, 255, 255],
+        );
+        assert_eq!(frame.glyphs.len(), 1, "full atlas skips a new glyph");
+        assert_eq!(
+            atlas.slots.len(),
+            placed,
+            "no reset while the frame is live"
+        );
+        assert_eq!(atlas.version, version, "the atlas was not wiped mid-frame");
+        atlas.start_frame();
+        frame.text(
+            &mut fonts,
+            &mut atlas,
+            "B",
+            20.0,
+            4.0,
+            13.0,
+            [255, 255, 255],
+        );
+        assert_eq!(
+            frame.glyphs.len(),
+            2,
+            "the next frame resets once and places"
+        );
+        assert_eq!(atlas.slots.len(), 1, "the reset cleared the earlier glyphs");
     }
 }
