@@ -352,6 +352,11 @@ pub struct Scene<'a> {
     pub title: &'a str,
     pub workspaces: &'a [Workspace],
     pub active_workspace: i64,
+    /// Widget IDs per bar area, in draw order. Unknown IDs already failed
+    /// config validation; IDs whose module does not exist yet draw nothing.
+    pub left: &'a [&'a str],
+    pub center: &'a [&'a str],
+    pub right: &'a [&'a str],
 }
 
 pub fn build(scene: &Scene<'_>, fonts: &mut FontSystem, atlas: &mut Atlas) -> Option<Frame> {
@@ -365,68 +370,219 @@ pub fn build(scene: &Scene<'_>, fonts: &mut FontSystem, atlas: &mut Atlas) -> Op
 
     let scale = scene.scale.max(1.0);
     let font_size = 13.0 * scale;
-    let text_h = font_size * 1.3;
-    let text_y = ((scene.height as f32) - text_h) / 2.0;
-    let fg = scene.theme.fg;
+    let width = scene.width as f32;
+    let edge = 8.0 * scale;
+    let gap = 10.0 * scale;
+    let text_y = ((scene.height as f32) - font_size * 1.3) / 2.0;
+    // Centre first: the side areas only get the room it leaves.
+    let center_width = area_width(fonts, scene, scene.center, font_size, scale)
+        .min((width - 2.0 * edge).max(0.0));
+    let center_x = ((width - center_width) / 2.0).max(edge);
+    let left_budget = (center_x - edge - gap).max(0.0);
+    let right_edge = width - edge;
+    let right_start = (center_x + center_width + gap).min(right_edge);
+    let right_budget = (right_edge - right_start).max(0.0);
+    draw_area(
+        &mut frame,
+        fonts,
+        atlas,
+        scene,
+        scene.left,
+        edge,
+        left_budget,
+        font_size,
+        text_y,
+        scale,
+        gap,
+    );
+    draw_area(
+        &mut frame,
+        fonts,
+        atlas,
+        scene,
+        scene.center,
+        center_x,
+        center_width,
+        font_size,
+        text_y,
+        scale,
+        gap,
+    );
+    let right_width = area_width(fonts, scene, scene.right, font_size, scale).min(right_budget);
+    draw_area(
+        &mut frame,
+        fonts,
+        atlas,
+        scene,
+        scene.right,
+        right_edge - right_width,
+        right_width,
+        font_size,
+        text_y,
+        scale,
+        gap,
+    );
+    Some(frame)
+}
 
-    let mut x = 8.0 * scale;
-    let left_limit = scene.width as f32 * 0.45;
+/// Natural width of an area: every module that would draw, plus the gaps
+/// between them. `active_window` is measured at its natural text width and is
+/// ellipsized later when the budget is smaller.
+fn area_width(
+    fonts: &mut FontSystem,
+    scene: &Scene<'_>,
+    ids: &[&str],
+    font_size: f32,
+    scale: f32,
+) -> f32 {
+    let mut total = 0.0;
+    let mut count = 0;
+    for id in ids {
+        let width = match *id {
+            "workspaces" => workspaces_width(scene, fonts, font_size, scale, f32::INFINITY),
+            "clock" => text_width(fonts, scene.clock, font_size),
+            "active_window" if !scene.title.is_empty() => {
+                text_width(fonts, scene.title, font_size)
+            }
+            _ => 0.0,
+        };
+        if width > 0.0 {
+            total += width;
+            count += 1;
+        }
+    }
+    if count > 1 {
+        total += 10.0 * scale * (count - 1) as f32;
+    }
+    total
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_area(
+    frame: &mut Frame,
+    fonts: &mut FontSystem,
+    atlas: &mut Atlas,
+    scene: &Scene<'_>,
+    ids: &[&str],
+    start: f32,
+    budget: f32,
+    font_size: f32,
+    text_y: f32,
+    scale: f32,
+    gap: f32,
+) {
+    let mut x = start;
+    let mut used = 0.0;
+    for id in ids {
+        let offset = if used > 0.0 { gap } else { 0.0 };
+        let remaining = (budget - used - offset).max(0.0);
+        let width = match *id {
+            "workspaces" => draw_workspaces(frame, fonts, atlas, scene, x + offset, remaining, font_size, text_y, scale),
+            "clock" => {
+                let width = text_width(fonts, scene.clock, font_size);
+                if width <= remaining {
+                    frame.text(fonts, atlas, scene.clock, x + offset, text_y, font_size, scene.theme.fg);
+                    width
+                } else {
+                    0.0
+                }
+            }
+            "active_window" if !scene.title.is_empty() && remaining >= 16.0 * scale => {
+                let title = ellipsize(scene.title, remaining, |s| text_width(fonts, s, font_size));
+                if title.is_empty() {
+                    0.0
+                } else {
+                    let width = text_width(fonts, &title, font_size);
+                    frame.text(fonts, atlas, &title, x + offset, text_y, font_size, scene.theme.muted);
+                    width
+                }
+            }
+            _ => 0.0,
+        };
+        if width <= 0.0 {
+            continue;
+        }
+        x += offset + width;
+        used += offset + width;
+    }
+}
+
+fn workspaces_width(
+    scene: &Scene<'_>,
+    fonts: &mut FontSystem,
+    font_size: f32,
+    scale: f32,
+    budget: f32,
+) -> f32 {
+    let mut width = 0.0;
+    let mut count = 0;
     for ws in scene.workspaces {
         let label = if ws.name.is_empty() {
             ws.id.to_string()
         } else {
             ws.name.clone()
         };
-        let width = text_width(fonts, &label, font_size);
-        let pill = width + 12.0 * scale;
-        if x + pill > left_limit {
+        let pill = text_width(fonts, &label, font_size) + 12.0 * scale;
+        let offset = if count > 0 { 4.0 * scale } else { 0.0 };
+        if width + offset + pill > budget {
+            break;
+        }
+        width += offset + pill;
+        count += 1;
+    }
+    width
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_workspaces(
+    frame: &mut Frame,
+    fonts: &mut FontSystem,
+    atlas: &mut Atlas,
+    scene: &Scene<'_>,
+    start: f32,
+    budget: f32,
+    font_size: f32,
+    text_y: f32,
+    scale: f32,
+) -> f32 {
+    let mut x = start;
+    let mut used = 0.0;
+    for ws in scene.workspaces {
+        let label = if ws.name.is_empty() {
+            ws.id.to_string()
+        } else {
+            ws.name.clone()
+        };
+        let pill = text_width(fonts, &label, font_size) + 12.0 * scale;
+        let offset = if used > 0.0 { 4.0 * scale } else { 0.0 };
+        if used + offset + pill > budget {
             break;
         }
         let active = ws.id == scene.active_workspace;
         if active {
             frame.fill(
-                x,
+                x + offset,
                 4.0 * scale,
                 pill,
                 scene.height as f32 - 8.0 * scale,
                 scene.theme.accent,
             );
         }
-        let color = if active { scene.theme.bg } else { fg };
+        let color = if active { scene.theme.bg } else { scene.theme.fg };
         frame.text(
             fonts,
             atlas,
             &label,
-            x + 6.0 * scale,
+            x + offset + 6.0 * scale,
             text_y,
             font_size,
             color,
         );
-        x += pill + 4.0 * scale;
+        x += offset + pill;
+        used += offset + pill;
     }
-
-    let clock_w = text_width(fonts, scene.clock, font_size);
-    let clock_x = (((scene.width as f32) - clock_w) / 2.0).max(0.0);
-    frame.text(fonts, atlas, scene.clock, clock_x, text_y, font_size, fg);
-
-    let title_x = clock_x + clock_w + 12.0 * scale;
-    let title_max = (scene.width as f32 - 8.0 * scale) - title_x;
-    if !scene.title.is_empty() && title_max > 16.0 * scale {
-        let title = ellipsize(scene.title, title_max, |s| text_width(fonts, s, font_size));
-        frame.text(
-            fonts,
-            atlas,
-            &title,
-            title_x,
-            text_y,
-            font_size,
-            scene.theme.muted,
-        );
-    }
-
-    Some(frame)
+    used
 }
-
 pub(crate) fn text_width(fonts: &mut FontSystem, text: &str, size: f32) -> f32 {
     let mut buffer = Buffer::new(fonts, Metrics::new(size, size * 1.3));
     buffer.set_text(text, &Attrs::new(), Shaping::Advanced, None);
@@ -557,6 +713,116 @@ mod tests {
                 .any(|px| px[3] == 255 && px[0] > 0),
             "glyphs produced visible coverage"
         );
+    }
+    fn workspace(id: i64, name: &str) -> Workspace {
+        Workspace {
+            id,
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn bar_areas_follow_the_configured_modules() {
+        let mut fonts = FontSystem::new();
+        if fonts.db().is_empty() {
+            return;
+        }
+        let theme = Theme::from_config("dark", "#8AB4F8");
+        let workspaces = [workspace(1, "one"), workspace(2, "")];
+        let mut atlas = Atlas::new();
+        let left = ["clock"];
+        let center: [&str; 0] = [];
+        let right = ["workspaces"];
+        let scene = Scene {
+            width: 800,
+            height: 32,
+            scale: 1.0,
+            theme: &theme,
+            clock: "12:34",
+            title: "Title",
+            workspaces: &workspaces,
+            active_workspace: 1,
+            left: &left,
+            center: &center,
+            right: &right,
+        };
+        let frame = build(&scene, &mut fonts, &mut atlas).expect("frame");
+        let clock_x = frame
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.x)
+            .fold(f32::MAX, f32::min);
+        assert!(clock_x < 60.0, "clock moved to the left area: {clock_x}");
+        let accent = frame
+            .rects
+            .iter()
+            .find(|rect| rect.color == theme.accent)
+            .expect("active workspace pill");
+        assert!(
+            accent.x > 600.0,
+            "workspaces moved to the right area: {}",
+            accent.x
+        );
+        assert!(
+            frame.glyphs.iter().all(|glyph| glyph.x + glyph.w as f32 <= 800.0),
+            "no glyph crossed the right edge"
+        );
+    }
+    #[test]
+    fn crowded_bar_stays_inside_the_frame() {
+        let mut fonts = FontSystem::new();
+        if fonts.db().is_empty() {
+            return;
+        }
+        let theme = Theme::from_config("dark", "#8AB4F8");
+        let workspaces: Vec<Workspace> = (1..=12).map(|id| workspace(id, "desk")).collect();
+        let mut atlas = Atlas::new();
+        let left = ["launcher", "workspaces", "active_window"];
+        let center = ["clock"];
+        let right = [
+            "media",
+            "audio",
+            "network",
+            "battery",
+            "tray",
+            "notifications",
+            "control_center",
+            "active_window",
+        ];
+        let title = "A window title long enough to need ellipsis even on a wide bar";
+        let scene = Scene {
+            width: 320,
+            height: 32,
+            scale: 1.0,
+            theme: &theme,
+            clock: "23:59",
+            title,
+            workspaces: &workspaces,
+            active_workspace: 3,
+            left: &left,
+            center: &center,
+            right: &right,
+        };
+        let frame = build(&scene, &mut fonts, &mut atlas).expect("frame");
+        for rect in &frame.rects {
+            assert!(
+                rect.x >= 0.0 && rect.x + rect.w <= 320.0,
+                "rect escaped the frame: {rect:?}"
+            );
+            assert!(rect.y >= 0.0 && rect.y + rect.h <= 32.0, "rect height: {rect:?}");
+        }
+        for glyph in &frame.glyphs {
+            assert!(
+                glyph.x >= 0.0 && glyph.x + glyph.w as f32 <= 320.0,
+                "glyph escaped the frame: {glyph:?}"
+            );
+            assert!(
+                glyph.y >= 0.0 && glyph.y + glyph.h as f32 <= 32.0,
+                "glyph height: {glyph:?}"
+            );
+        }
+        let pixmap = rasterize(&frame, &atlas).expect("pixels");
+        assert_eq!((pixmap.width(), pixmap.height()), (320, 32));
     }
     #[test]
     fn full_atlas_skips_glyphs_until_the_next_frame() {

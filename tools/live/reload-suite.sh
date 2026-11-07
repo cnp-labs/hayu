@@ -99,12 +99,17 @@ check "$(launcher_layers)" 1 "launcher mapped after reload"
 "$BIN" launcher toggle >/dev/null; sleep 1
 check "$(launcher_layers)" 0 "launcher closed again"
 
-# 2. A key that still needs a restart is named, and the applied part lands.
-write_cfg 'schema_version = 1' '' '[bar]' 'position = "bottom"' 'height = 40' 'left = ["clock"]' '' '[clock]' 'format = "%H"'
+# 2. A key that still needs a restart is named, the applied part lands, and a
+#    module-area change is applied rather than reported.
+write_cfg 'schema_version = 1' '' '[bar]' 'position = "bottom"' 'height = 40' 'center = ["clock"]' '' '[clock]' 'format = "%H"' '' '[tray]' 'enabled = false'
 out=$(reload 2>&1); check "$?" 0 "reload with a restart-only key exits 0"
 case "$out" in
-    *"restart required for: bar.left"*) ok "restart-only key is reported" ;;
+    *"restart required for: tray"*) ok "restart-only key is reported" ;;
     *) bad "restart-only key is reported (got: $out)" ;;
+esac
+case "$out" in
+    *bar.left*|*bar.center*) bad "module areas are applied, not reported ($out)" ;;
+    *) ok "module areas are applied, not reported" ;;
 esac
 sleep 1
 check "$(bar_h)" 40 "restart-only reload kept the applied geometry"
@@ -125,7 +130,7 @@ check "$(launcher_layers)" 1 "launcher mapped after a rejected reload"
 # 4. launcher.enabled = false is applied, not reported, and closes an overlay.
 write_cfg 'schema_version = 1' '' '[bar]' 'position = "bottom"' 'height = 40' 'left = ["clock"]' '' '[launcher]' 'enabled = false'
 out=$(reload 2>&1); check "$?" 0 "reload with launcher disabled exits 0"
-case "$out" in *restart*) bad "launcher.enabled is applied, not reported ($out)" ;; *) ok "launcher.enabled is applied, not reported" ;; esac
+case "$out" in *launcher.enabled*) bad "launcher.enabled is applied, not reported ($out)" ;; *) ok "launcher.enabled is applied, not reported" ;; esac
 sleep 1
 "$BIN" launcher toggle 2>/dev/null; code=$?
 if [ "$code" -ne 0 ]; then ok "disabled launcher rejects toggle ($code)"; else bad "disabled launcher accepted toggle"; fi
@@ -138,7 +143,7 @@ check "$(launcher_layers)" 0 "disabled launcher left nothing mapped"
 #    launcher keeps working through the output list rather than a bar surface.
 write_cfg 'schema_version = 1' '' '[bar]' 'position = "bottom"' 'height = 40' 'left = ["clock"]' 'outputs = ["NOPE-1"]' '' '[launcher]' 'enabled = true'
 out=$(reload 2>&1); check "$?" 0 "outputs-only reload exits 0"
-case "$out" in *restart*) bad "bar.outputs is applied, not reported ($out)" ;; *) ok "bar.outputs is applied, not reported" ;; esac
+case "$out" in *bar.outputs*) bad "bar.outputs is applied, not reported ($out)" ;; *) ok "bar.outputs is applied, not reported" ;; esac
 sleep 1
 check "$(bar_h)" none "a filter with no matching output removes the bar"
 "$BIN" launcher open >/dev/null; sleep 1
@@ -148,7 +153,7 @@ check "$(launcher_layers)" 1 "the launcher still opens without a bar"
 # 6. bar.enabled = false is applied too.
 write_cfg 'schema_version = 1' '' '[bar]' 'position = "bottom"' 'height = 40' 'left = ["clock"]' 'enabled = false' '' '[launcher]' 'enabled = true'
 out=$(reload 2>&1); check "$?" 0 "bar.enabled=false reload exits 0"
-case "$out" in *restart*) bad "bar.enabled is applied, not reported ($out)" ;; *) ok "bar.enabled is applied, not reported" ;; esac
+case "$out" in *bar.enabled*) bad "bar.enabled is applied, not reported ($out)" ;; *) ok "bar.enabled is applied, not reported" ;; esac
 sleep 1
 check "$(bar_h)" none "bar.enabled=false removes the bar"
 "$BIN" launcher open >/dev/null; sleep 1

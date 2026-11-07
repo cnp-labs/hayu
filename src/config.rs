@@ -248,6 +248,22 @@ impl Default for Clipboard {
     }
 }
 
+/// Widget IDs accepted in `bar.left`, `bar.center` and `bar.right`. The bar
+/// draws `workspaces`, `clock` and `active_window`; the rest are part of the
+/// schema but have no module yet, so they draw nothing.
+pub const BAR_MODULES: &[&str] = &[
+    "launcher",
+    "workspaces",
+    "active_window",
+    "clock",
+    "media",
+    "audio",
+    "network",
+    "battery",
+    "tray",
+    "notifications",
+    "control_center",
+];
 const ROOT_KEYS: &[&str] = &[
     "schema_version",
     "appearance",
@@ -318,9 +334,6 @@ pub fn restart_required(old: &Config, new: &Config) -> Vec<&'static str> {
             old.appearance.reduce_motion != new.appearance.reduce_motion,
             "appearance.reduce_motion",
         ),
-        (old.bar.left != new.bar.left, "bar.left"),
-        (old.bar.center != new.bar.center, "bar.center"),
-        (old.bar.right != new.bar.right, "bar.right"),
         (
             old.launcher.favorites != new.launcher.favorites,
             "launcher.favorites",
@@ -424,6 +437,17 @@ fn validate(cfg: &Config) -> Result<(), ConfigError> {
         1_048_576,
     )?;
     enum_value("wallpaper.mode", &cfg.wallpaper.mode, &["fit", "fill"])?;
+    for (area, modules) in [
+        ("bar.left", &cfg.bar.left),
+        ("bar.center", &cfg.bar.center),
+        ("bar.right", &cfg.bar.right),
+    ] {
+        for module in modules {
+            if !BAR_MODULES.contains(&module.as_str()) {
+                return Err(ConfigError(format!("{area}: unknown widget {module:?}")));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -503,17 +527,20 @@ mod tests {
     fn restart_required_lists_only_unapplied_keys() {
         let base = Config::default();
         let applied = parse(
-            "schema_version = 1\n[appearance]\nmode = \"light\"\naccent = \"#ffffff\"\n[bar]\nheight = 40\nposition = \"bottom\"\n[clock]\nformat = \"%H\"\n[launcher]\nenabled = false\n",
+            "schema_version = 1\n[appearance]\nmode = \"light\"\naccent = \"#ffffff\"\n[bar]\nheight = 40\nposition = \"bottom\"\nleft = [\"clock\"]\n[clock]\nformat = \"%H\"\n[launcher]\nenabled = false\n",
         )
         .unwrap();
-        assert!(restart_required(&base, &applied).is_empty());
+        assert!(
+            restart_required(&base, &applied).is_empty(),
+            "module areas are drawn from the live config"
+        );
         let restart = parse(
-            "schema_version = 1\n[bar]\nenabled = false\noutputs = [\"DP-1\"]\nleft = [\"clock\"]\n[launcher]\nfavorites = [\"foot.desktop\"]\n[tray]\nenabled = false\n",
+            "schema_version = 1\n[bar]\nenabled = false\noutputs = [\"DP-1\"]\n[launcher]\nfavorites = [\"foot.desktop\"]\n[tray]\nenabled = false\n",
         )
         .unwrap();
         assert_eq!(
             restart_required(&base, &restart),
-            ["bar.left", "launcher.favorites", "tray"],
+            ["launcher.favorites", "tray"],
             "bar.enabled and bar.outputs are applied by sync_bars"
         );
         assert_eq!(
@@ -521,6 +548,12 @@ mod tests {
             Vec::<&'static str>::new(),
             "an identical config needs no restart"
         );
+    }
+    #[test]
+    fn unknown_bar_widget_is_a_config_error() {
+        let err = parse("schema_version = 1\n[bar]\nright = [\"netwrk\"]\n").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("bar.right") && text.contains("netwrk"), "{text}");
     }
     #[test]
     fn future_schema_rejected() {

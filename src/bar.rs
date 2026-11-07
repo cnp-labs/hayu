@@ -885,6 +885,7 @@ impl State {
             };
             draw_bar(
                 bar,
+                &self.cfg,
                 &self.theme,
                 &self.clock,
                 self.active_workspace,
@@ -924,6 +925,7 @@ impl State {
 #[allow(clippy::too_many_arguments)]
 fn draw_bar(
     bar: &mut Bar,
+    cfg: &Config,
     theme: &Theme,
     clock: &str,
     active_workspace: i64,
@@ -938,6 +940,9 @@ fn draw_bar(
     let scale = bar.scale.max(1.0);
     let width = pixel_size(bar.width, scale);
     let height = pixel_size(bar.height, scale);
+    let left: Vec<&str> = cfg.bar.left.iter().map(String::as_str).collect();
+    let center: Vec<&str> = cfg.bar.center.iter().map(String::as_str).collect();
+    let right: Vec<&str> = cfg.bar.right.iter().map(String::as_str).collect();
     let scene = Scene {
         width,
         height,
@@ -947,6 +952,9 @@ fn draw_bar(
         title,
         workspaces,
         active_workspace,
+        left: &left,
+        center: &center,
+        right: &right,
     };
     let Some(frame) = render::build(&scene, fonts, &mut bar.atlas) else {
         return;
