@@ -4,6 +4,7 @@ use chrono::{NaiveTime, Timelike};
 use cosmic_text::{
     Attrs, Buffer, CacheKey, FontSystem, Metrics, Shaping, SwashCache, SwashContent,
 };
+#[cfg(any(test, feature = "gpu-spike"))]
 use tiny_skia::{Color as SkColor, Pixmap};
 
 use crate::config;
@@ -323,7 +324,8 @@ impl Default for Atlas {
     }
 }
 
-/// Reference rasterizer: used by unit tests and only reachable from them.
+/// Reference rasterizer: unit tests and the GPU spike only.
+#[cfg(any(test, feature = "gpu-spike"))]
 pub fn rasterize(frame: &Frame, atlas: &Atlas) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(frame.width, frame.height)?;
     let bg = frame.bg;

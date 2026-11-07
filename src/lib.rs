@@ -3,6 +3,7 @@ pub mod bar;
 pub mod config;
 pub mod desktop;
 pub mod doctor;
+#[cfg(feature = "gpu-spike")]
 pub mod gpu;
 pub mod hyprland;
 pub mod ipc;
