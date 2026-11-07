@@ -9,4 +9,5 @@ description = "Throwaway zwp_virtual_keyboard_v1 injector for Hayu live checks"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 xkbcommon = { version = "0.8", default-features = false }

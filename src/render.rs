@@ -19,6 +19,25 @@ pub struct Frame {
     pub bg: [u8; 3],
     pub rects: Vec<RectCmd>,
     pub glyphs: Vec<Glyph>,
+    /// Workspace pills exactly as drawn, in buffer pixels. Hit testing reads
+    /// this list instead of recomputing the layout.
+    pub pills: Vec<Pill>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pill {
+    pub id: i64,
+    pub x: f32,
+    pub w: f32,
+}
+
+/// Workspace whose drawn pill contains `logical_x`, if any.
+pub fn pill_at(pills: &[Pill], logical_x: f32, scale: f32) -> Option<i64> {
+    let x = logical_x * scale;
+    pills
+        .iter()
+        .find(|pill| x >= pill.x && x < pill.x + pill.w)
+        .map(|pill| pill.id)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +73,7 @@ impl Frame {
             bg,
             rects: Vec::new(),
             glyphs: Vec::new(),
+            pills: Vec::new(),
         })
     }
 
@@ -569,6 +589,11 @@ fn draw_workspaces(
             );
         }
         let color = if active { scene.theme.bg } else { scene.theme.fg };
+        frame.pills.push(Pill {
+            id: ws.id,
+            x: x + offset,
+            w: pill,
+        });
         frame.text(
             fonts,
             atlas,
@@ -769,6 +794,27 @@ mod tests {
         );
     }
     #[test]
+    fn workspace_hit_test_uses_the_drawn_pills() {
+        let pills = [
+            Pill {
+                id: 3,
+                x: 10.0,
+                w: 20.0,
+            },
+            Pill {
+                id: 5,
+                x: 40.0,
+                w: 10.0,
+            },
+        ];
+        assert_eq!(pill_at(&pills, 10.0, 1.0), Some(3));
+        assert_eq!(pill_at(&pills, 29.9, 1.0), Some(3));
+        assert_eq!(pill_at(&pills, 30.0, 1.0), None, "half-open ranges");
+        assert_eq!(pill_at(&pills, 45.0, 1.0), Some(5));
+        assert_eq!(pill_at(&pills, 20.0, 2.0), Some(5), "logical x is scaled");
+        assert_eq!(pill_at(&pills, 100.0, 1.0), None);
+    }
+    #[test]
     fn crowded_bar_stays_inside_the_frame() {
         let mut fonts = FontSystem::new();
         if fonts.db().is_empty() {
@@ -819,6 +865,12 @@ mod tests {
             assert!(
                 glyph.y >= 0.0 && glyph.y + glyph.h as f32 <= 32.0,
                 "glyph height: {glyph:?}"
+            );
+        }
+        for pill in &frame.pills {
+            assert!(
+                pill.x >= 0.0 && pill.x + pill.w <= 320.0,
+                "pill escaped the frame: {pill:?}"
             );
         }
         let pixmap = rasterize(&frame, &atlas).expect("pixels");

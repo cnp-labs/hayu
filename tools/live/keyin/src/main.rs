@@ -8,23 +8,30 @@
 //! keyin press:Down              # press and release a named key
 //! keyin hold:BackSpace          # one press held long enough for the compositor to repeat
 //! keyin raw:44                  # evdev keycode 28..=255, press and release
+//! keyin click:100:16            # left click at a layout-space point
 //! ```
 //!
 //! `KEYIN_LAYOUT` selects the uploaded keymap (default `us`). `type:` maps
 //! characters through a fixed `us` table, so it is layout-independent by
 //! design: the check sends the same physical keys either way. `raw:` is what a
 //! layout switch test needs, because the character then comes from the
-//! uploaded keymap instead of this table.
+//! uploaded keymap instead of this table. `click:` uses
+//! `zwlr_virtual_pointer_v1` and needs `KEYIN_SCREEN=WxH` with the total
+//! layout size in logical pixels.
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::time::{Duration, SystemTime};
 
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
-use wayland_client::protocol::{wl_registry, wl_seat};
+use wayland_client::protocol::{wl_pointer, wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
     zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
+};
+use wayland_protocols_wlr::virtual_pointer::v1::client::{
+    zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
+    zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
 };
 
 struct State;
@@ -65,6 +72,28 @@ impl Dispatch<ZwpVirtualKeyboardManagerV1, ()> for State {
     }
 }
 
+impl Dispatch<ZwlrVirtualPointerManagerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZwlrVirtualPointerManagerV1,
+        _: <ZwlrVirtualPointerManagerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+impl Dispatch<ZwlrVirtualPointerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZwlrVirtualPointerV1,
+        _: <ZwlrVirtualPointerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
 impl Dispatch<ZwpVirtualKeyboardV1, ()> for State {
     fn event(
         _: &mut Self,
@@ -79,9 +108,9 @@ impl Dispatch<ZwpVirtualKeyboardV1, ()> for State {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: keyin type:<text> | press:<Name> | hold:<Name> | raw:<evdev>\n\
+        "usage: keyin type:<text> | press:<Name> | hold:<Name> | raw:<evdev> | click:<x>:<y>\n\
          names: Return Escape BackSpace Tab Delete Up Down Left Right Home End\n\
-         env: KEYIN_LAYOUT (default us), KEYIN_STEP_MS (default 20)"
+         env: KEYIN_LAYOUT (default us), KEYIN_STEP_MS (default 20), KEYIN_SCREEN (WxH)"
     );
     std::process::exit(2)
 }
@@ -243,6 +272,23 @@ fn main() {
         }
     };
     let keyboard = manager.create_virtual_keyboard(&seat, &qh, ());
+    let wants_pointer = args.iter().any(|arg| arg.starts_with("click:"));
+    let pointer: Option<ZwlrVirtualPointerV1> = if wants_pointer {
+        let manager: ZwlrVirtualPointerManagerV1 = match globals.bind(&qh, 1..=2, ()) {
+            Ok(manager) => manager,
+            Err(error) => {
+                eprintln!("keyin: compositor has no zwlr_virtual_pointer_manager_v1: {error}");
+                std::process::exit(1);
+            }
+        };
+        Some(manager.create_virtual_pointer(Some(&seat), &qh, ()))
+    } else {
+        None
+    };
+    let screen = std::env::var("KEYIN_SCREEN").ok().and_then(|value| {
+        let (w, h) = value.split_once('x')?;
+        Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?))
+    });
     if let Err(error) = upload_keymap(&conn, &keyboard, &layout) {
         eprintln!("keyin: {error}");
         std::process::exit(1);
@@ -294,6 +340,37 @@ fn main() {
                     Duration::from_millis(8)
                 };
                 tap(key, false, hold);
+            }
+            "click" => {
+                let (x, y) = match value.split_once(':') {
+                    Some((x, y)) => match (x.parse::<f64>(), y.parse::<f64>()) {
+                        (Ok(x), Ok(y)) => (x, y),
+                        _ => {
+                            eprintln!("keyin: click needs <x>:<y> floats, got {value:?}");
+                            std::process::exit(2);
+                        }
+                    },
+                    None => {
+                        eprintln!("keyin: click needs <x>:<y>, got {value:?}");
+                        std::process::exit(2);
+                    }
+                };
+                let (Some(pointer), Some((width, height))) = (pointer.as_ref(), screen) else {
+                    eprintln!("keyin: click needs zwlr_virtual_pointer and KEYIN_SCREEN=WxH");
+                    std::process::exit(2);
+                };
+                pointer.motion_absolute(now_ms(), (x * 256.0) as u32, (y * 256.0) as u32, (width * 256.0) as u32, (height * 256.0) as u32);
+                pointer.frame();
+                let _ = conn.flush();
+                std::thread::sleep(Duration::from_millis(60));
+                pointer.button(now_ms(), 0x110, wl_pointer::ButtonState::Pressed);
+                pointer.frame();
+                let _ = conn.flush();
+                std::thread::sleep(Duration::from_millis(60));
+                pointer.button(now_ms(), 0x110, wl_pointer::ButtonState::Released);
+                pointer.frame();
+                let _ = conn.flush();
+                std::thread::sleep(Duration::from_millis(step));
             }
             "raw" => {
                 let key: u32 = match value.parse() {

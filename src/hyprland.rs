@@ -120,7 +120,29 @@ impl Hyprland {
         })
     }
 
-    fn request<T: for<'de> Deserialize<'de>>(&self, command: &str) -> Result<T, String> {
+    /// Focus a workspace by id. Hyprland 0.57 with a Lua config rejects the
+    /// legacy `dispatch` string, so fall back to the Lua `repl` form.
+    pub fn switch_workspace(&self, id: i64) -> Result<(), String> {
+        match self.dispatch(&format!("dispatch workspace {id}")) {
+            Ok(_) => Ok(()),
+            Err(legacy) => self
+                .dispatch(&format!(
+                    "repl hl.dispatch(hl.dsp.focus({{ workspace = {id} }}))"
+                ))
+                .map(|_| ())
+                .map_err(|lua| format!("legacy dispatch failed ({legacy}); Lua dispatch failed ({lua})")),
+        }
+    }
+    /// Send a plain Hyprland command (`dispatch ...`) and return its raw reply.
+    pub fn dispatch(&self, command: &str) -> Result<String, String> {
+        let reply = self.exchange(command)?;
+        if reply.trim_start().starts_with("ok") {
+            Ok(reply)
+        } else {
+            Err(reply.trim().to_string())
+        }
+    }
+    fn exchange(&self, command: &str) -> Result<String, String> {
         let mut stream = UnixStream::connect(self.request_socket())
             .map_err(|e| format!("cannot connect to Hyprland request socket: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
@@ -143,7 +165,11 @@ impl Hyprland {
             }
             response.extend_from_slice(&chunk[..n]);
         }
-        serde_json::from_slice(&response)
+        String::from_utf8(response).map_err(|e| format!("invalid Hyprland reply for {command}: {e}"))
+    }
+    fn request<T: for<'de> Deserialize<'de>>(&self, command: &str) -> Result<T, String> {
+        let reply = self.exchange(command)?;
+        serde_json::from_str(&reply)
             .map_err(|e| format!("invalid Hyprland response for {command}: {e}"))
     }
 

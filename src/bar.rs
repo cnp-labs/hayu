@@ -19,6 +19,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Modifiers, RawModifiers},
+        pointer::{BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::WaylandSurface,
     shell::wlr_layer::{
@@ -29,7 +30,7 @@ use smithay_client_toolkit::{
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_seat, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
 };
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
@@ -94,6 +95,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
         qh: qh.clone(),
         seat_state,
         keyboard: None,
+        pointer: None,
         ime_manager,
         viewporter,
         fractional,
@@ -262,6 +264,8 @@ struct Bar {
     fractional: Option<WpFractionalScaleV1>,
     viewport: Option<WpViewport>,
     configured: bool,
+    /// Workspace pills as last drawn, so a click uses the same geometry.
+    pills: Vec<render::Pill>,
 }
 
 struct Ime {
@@ -288,6 +292,7 @@ pub struct State {
     qh: QueueHandle<State>,
     seat_state: SeatState,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    pointer: Option<wl_pointer::WlPointer>,
     ime_manager: Option<ZwpTextInputManagerV3>,
     viewporter: Option<WpViewporter>,
     fractional: Option<WpFractionalScaleManagerV1>,
@@ -865,6 +870,7 @@ impl State {
                 fractional,
                 viewport,
                 configured: false,
+                pills: Vec::new(),
             },
         );
     }
@@ -959,6 +965,15 @@ fn draw_bar(
     let Some(frame) = render::build(&scene, fonts, &mut bar.atlas) else {
         return;
     };
+    if std::env::var_os("HAYU_DEBUG_POINTER").is_some() {
+        let pills: Vec<String> = frame
+            .pills
+            .iter()
+            .map(|pill| format!("{}:{:.1}:{:.1}", pill.id, pill.x / scale, pill.w / scale))
+            .collect();
+        eprintln!("hayu: bar pills {} ({})", pills.join(" "), bar.width);
+    }
+    bar.pills = frame.pills.clone();
     let surface = bar.layer.wl_surface();
     apply_scale(surface, bar.viewport.as_ref(), bar.width, bar.height, scale);
     if bar.presenter.is_none() {
@@ -1162,6 +1177,49 @@ impl LayerShellHandler for State {
     }
 }
 
+impl PointerHandler for State {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            if let PointerEventKind::Press {
+                button: BTN_LEFT, ..
+            } = event.kind
+            {
+                self.click_bar(&event.surface, event.position.0 as f32);
+            }
+        }
+    }
+}
+
+impl State {
+    /// Left click on the bar. Only workspace pills react; everything else in
+    /// the bar ignores the click.
+    fn click_bar(&mut self, surface: &wl_surface::WlSurface, logical_x: f32) {
+        let Some(bar) = self
+            .bars
+            .values()
+            .find(|bar| bar.layer.wl_surface() == surface)
+        else {
+            return;
+        };
+        let Some(id) = render::pill_at(&bar.pills, logical_x, bar.scale.max(1.0)) else {
+            return;
+        };
+        if id == self.active_workspace {
+            return;
+        }
+        let Some(hypr) = &self.hypr else { return };
+        if let Err(error) = hypr.switch_workspace(id) {
+            eprintln!("hayu: cannot switch to workspace {id}: {error}");
+        }
+    }
+}
+
 impl SeatHandler for State {
     fn seat_state(&mut self) -> &mut SeatState {
         &mut self.seat_state
@@ -1182,6 +1240,12 @@ impl SeatHandler for State {
             // The initial seat is bound before the handler exists, so
             // `new_seat` never runs for it; capability is the reliable hook.
             self.ime_attach_seat(qh, &seat);
+        }
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            match self.seat_state.get_pointer(qh, &seat) {
+                Ok(pointer) => self.pointer = Some(pointer),
+                Err(error) => eprintln!("hayu: cannot create pointer: {error}"),
+            }
         }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             match self.seat_state.get_keyboard_with_repeat(
@@ -1208,6 +1272,11 @@ impl SeatHandler for State {
             && let Some(keyboard) = self.keyboard.take()
         {
             keyboard.release();
+        }
+        if capability == Capability::Pointer
+            && let Some(pointer) = self.pointer.take()
+        {
+            pointer.release();
         }
     }
 
