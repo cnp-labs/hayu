@@ -89,6 +89,7 @@ support in V1.
   `zwp_text_input_v3` client sees no `enter` on an IME-less session. Do not
   treat that as a client bug, and do not "fix" it by enabling text input
   without an `enter`.
+- Fractional scale is two objects, not a bigger buffer scale: create `wp_fractional_scale_v1` and `wp_viewport` before the surface's first commit, keep `wl_surface.buffer_scale` at 1, set the viewport destination to the logical size, and build the buffer at `round(logical × preferred_scale/120)`. Creating either after a buffer is attached is a protocol error, and letting the integer output scale overwrite a fractional one makes text jump between sizes.
 - The control socket is not the Hyprland socket: `src/ipc.rs` owns
   `$XDG_RUNTIME_DIR/hayu/<session>/control.sock` (0700 dir, 0600 socket,
   protocol v1, 4 KiB request cap, 1 s timeout). It runs as a calloop source,

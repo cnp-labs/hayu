@@ -321,6 +321,27 @@ HAYU_DEBUG_DUMP=/tmp/.../frame ./target/release/hayu run   # temporary patch
   machine without fonts the text assertions are skipped the same way the old
   render tests were.
 
+### Fractional and mixed scale (November 7, 2026)
+Run at `4f8327d` on Hyprland 0.57.1 with `HDMI-A-1` (1366×768, scale 1) and a
+temporary `HEADLESS-2` (1920×1080) set to scale 1.5 in one run and scale 2 in
+another. Both `wp_fractional_scale_v1` and `wp_viewporter` were offered, so the
+fractional path is what ran; no run removed either global. Buffers again came
+from a temporary, uncommitted `glReadPixels` dump written before
+`eglSwapBuffers` and removed after the run, so they show the renderer's output,
+not the composited desktop.
+```
+WAYLAND_DEBUG=1 XDG_CONFIG_HOME=/tmp/... ./target/release/hayu run
+```
+| Check | Observed |
+| --- | --- |
+| Protocol use | The log repeats `wl_surface.set_buffer_scale(1)` and `wp_viewport.set_destination(...)` for each surface as it draws: `(1366, 32)` and `(1280, 32)` for the two bars and `(560, 420)` for the launcher |
+| Bar buffer at 1.5 | Logical surface 1280×32, readback 1920×48; the scale-1 output painted 1366×32 at the same time, so mixed scales ran together |
+| Launcher buffer at 1.5 | Logical 560×420, readback 840×630; the image showed query with cursor, divider, six fixture rows, the accent highlight with dark label and desktop id, the ellipsised long entry and the footer |
+| Live scale change | Setting the same output to scale 2 without a restart moved the bar buffer 1440×48 → 1920×64 and the destination 1280 → 960 while the scale-1 output stayed 1366×32; reopening the launcher then produced 1120×840 for 560×420 |
+| Rounding | `cargo test` 48/48, including `fractional_scale_sizes_the_frame_in_pixels`: `1366×1.25 → 1708`, `32×1.5 → 48`, `1×1.5 → 2`, and an 840×630 frame at 1.5 |
+| Scale-1 regression | `input-suite.sh` 15/15, `reload-suite.sh` 41/41, `a11y-suite.py` exit 0, `doctor` exit 0, `config check` exit 0 — at scale 1, which now also draws through the viewport path |
+- What was not observed: a live 1.25 scale (unit test only); the input and reload suites at 1.5 (they ran at scale 1); a composited screenshot; and the integer fallback, because both globals were present.
+- The compositor restarted during this work: `coredumpctl` records a Hyprland 0.57.1 SIGSEGV inside its own cleanup path (`CCompositor::cleanup` → monitor and protocol destructors), its log has no hayu or viewport protocol error, and the suite results above were re-run on the new instance with the new `HYPRLAND_INSTANCE_SIGNATURE`. What requested that shutdown is not visible in the available logs.
 ### Terminal fallback arguments (November 5, 2026)
 
 The fallback list is not one invocation: each emulator has its own way to run a
