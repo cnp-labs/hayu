@@ -73,7 +73,7 @@ Items register through the watcher interface; the worker reads `Title`,
 `IconPixmap` and `IconName` once at registration, drops the item when its bus
 name disappears (`NameOwnerChanged`), and sends the list to the UI through a
 calloop channel. Nothing is polled. The service exists only while an actual bar consumes an enabled tray; reload/output loss stops the last consumer and releases watcher ownership. Stop cancels pending D-Bus calls; normal method calls have a one-second timeout. Generation tags reject messages from stopped lifecycles. Icon pixels use shared `Arc<[u8]>` ownership through snapshots and render inputs; the combined RGBA strip still copies pixels per draw and
-are uploaded only when the strip version changes; `Frame::tray_hits` records
+are uploaded only when the strip version changes. Each GLES presenter caches its context's `GL_MAX_TEXTURE_SIZE`; oversized image strips are nearest-centre downsampled independently per axis before upload, while fitting strips borrow their pixels unchanged. Normalized UVs retain icon placement and hit-testing; upload errors propagate without marking the image version current. This bounds GPU dimensions, not the existing bounded CPU strip allocation. `Frame::tray_hits` records
 the rects that were drawn, and a left click queues `Activate(0,0)` on the owned
 tray worker. Saturation reports an error instead of spawning a thread per click. Context menus, scroll and `NewIcon`/`NewTitle` refresh are out of this
 slice. Retained tray items and the registration command queue are capped at 64;

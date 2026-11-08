@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::os::raw::c_void;
 use std::ptr::NonNull;
@@ -32,6 +33,7 @@ pub struct GlPresenter {
     image_version: Option<u32>,
     mode: Option<glow::UniformLocation>,
     sampler: Option<glow::UniformLocation>,
+    max_texture_size: u32,
     width: u32,
     height: u32,
 }
@@ -71,6 +73,11 @@ impl GlPresenter {
         let gl = unsafe {
             glow::Context::from_loader_function_cstr(|name| display.get_proc_address(name))
         };
+        let max_texture_size = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) };
+        if max_texture_size <= 0 {
+            return Err(format!("GL_MAX_TEXTURE_SIZE is {max_texture_size}"));
+        }
+        let max_texture_size = max_texture_size as u32;
         unsafe {
             let (program, vao, vbo, texture, image_texture) = setup(&gl)?;
             gl.enable(glow::FRAMEBUFFER_SRGB);
@@ -90,6 +97,7 @@ impl GlPresenter {
                 image_version: None,
                 mode,
                 sampler,
+                max_texture_size,
                 width,
                 height,
             })
@@ -205,8 +213,11 @@ impl GlPresenter {
                 if let Some(image) = &frame.image
                     && self.image_version != Some(image.version)
                 {
-                    upload_image(gl, self.image_texture, image);
-                    self.image_version = Some(image.version);
+                    commit_upload(
+                        &mut self.image_version,
+                        image.version,
+                        upload_image(gl, self.image_texture, image, self.max_texture_size),
+                    )?;
                 }
                 gl.bind_texture(glow::TEXTURE_2D, Some(self.image_texture));
                 gl.uniform_1_i32(self.mode.as_ref(), 2);
@@ -476,22 +487,115 @@ unsafe fn compile(gl: &glow::Context, kind: u32, source: &str) -> Result<glow::S
     }
 }
 
-unsafe fn upload_image(gl: &glow::Context, texture: glow::Texture, image: &super::Image) {
+/// Record `version` only once the upload succeeded, so a failed upload is
+/// retried instead of leaving a stale texture marked current.
+fn commit_upload(
+    slot: &mut Option<u32>,
+    version: u32,
+    upload: Result<(), String>,
+) -> Result<(), String> {
+    upload?;
+    *slot = Some(version);
+    Ok(())
+}
+
+fn pixel_bytes(width: u32, height: u32) -> Option<u64> {
+    u64::from(width)
+        .checked_mul(u64::from(height))?
+        .checked_mul(4)
+}
+
+/// Pixel data to upload for the tray strip. A strip that fits the hardware
+/// limit is borrowed unchanged; an oversized one is resampled independently
+/// per axis. Nearest-centre sampling is deliberate: this path only exists for
+/// otherwise-unuploadable strips, and normalized UVs still address the same
+/// icon cells after the strip shrinks.
+fn upload_pixels<'a>(
+    image: &'a super::Image,
+    limit: u32,
+) -> Result<(u32, u32, Cow<'a, [u8]>), String> {
+    if image.width == 0 || image.height == 0 {
+        return Err(format!(
+            "image dimensions {}x{} are empty",
+            image.width, image.height
+        ));
+    }
+    if limit == 0 {
+        return Err("texture size limit is zero".to_string());
+    }
+    let Some(expected) = pixel_bytes(image.width, image.height) else {
+        return Err(format!(
+            "image dimensions {}x{} overflow",
+            image.width, image.height
+        ));
+    };
+    if expected != image.rgba.len() as u64 {
+        return Err(format!(
+            "image {}x{} has {} bytes, expected {expected}",
+            image.width,
+            image.height,
+            image.rgba.len()
+        ));
+    }
+    let width = image.width.min(limit);
+    let height = image.height.min(limit);
+    if width == image.width && height == image.height {
+        return Ok((width, height, Cow::Borrowed(&image.rgba)));
+    }
+    let Some(bytes) = pixel_bytes(width, height) else {
+        return Err(format!("downsampled dimensions {width}x{height} overflow"));
+    };
+    let Ok(bytes) = usize::try_from(bytes) else {
+        return Err(format!("downsampled texture is too large: {bytes} bytes"));
+    };
+    let mut rgba = Vec::with_capacity(bytes);
+    let source_width = u64::from(image.width);
+    for y in 0..height {
+        let source_y = ((2 * u64::from(y) + 1) * u64::from(image.height)) / (2 * u64::from(height));
+        for x in 0..width {
+            let source_x = ((2 * u64::from(x) + 1) * source_width) / (2 * u64::from(width));
+            let start = ((source_y * source_width + source_x) * 4) as usize;
+            rgba.extend_from_slice(&image.rgba[start..start + 4]);
+        }
+    }
+    Ok((width, height, Cow::Owned(rgba)))
+}
+
+unsafe fn upload_image(
+    gl: &glow::Context,
+    texture: glow::Texture,
+    image: &super::Image,
+    limit: u32,
+) -> Result<(), String> {
+    let (width, height, pixels) = upload_pixels(image, limit)?;
     unsafe {
+        // Drain errors left by earlier draws so only this upload is attributed.
+        for _ in 0..8 {
+            if gl.get_error() == glow::NO_ERROR {
+                break;
+            }
+        }
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         gl.tex_image_2d(
             glow::TEXTURE_2D,
             0,
             glow::SRGB8_ALPHA8 as i32,
-            image.width as i32,
-            image.height as i32,
+            width as i32,
+            height as i32,
             0,
             glow::RGBA,
             glow::UNSIGNED_BYTE,
-            glow::PixelUnpackData::Slice(Some(&image.rgba)),
+            glow::PixelUnpackData::Slice(Some(pixels.as_ref())),
         );
+        let error = gl.get_error();
+        if error != glow::NO_ERROR {
+            return Err(format!(
+                "texture upload {width}x{height}: GL error 0x{error:04x}"
+            ));
+        }
     }
+    Ok(())
 }
 unsafe fn upload_atlas(gl: &glow::Context, texture: glow::Texture, atlas: &Atlas) {
     unsafe {
@@ -508,5 +612,102 @@ unsafe fn upload_atlas(gl: &glow::Context, texture: glow::Texture, atlas: &Atlas
             glow::UNSIGNED_BYTE,
             glow::PixelUnpackData::Slice(Some(&atlas.pixels)),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::Image;
+
+    fn strip(icons: u32, icon_width: u32, height: u32) -> Image {
+        let width = icons * icon_width;
+        let mut rgba = vec![0; (width * height * 4) as usize];
+        for index in 0..icons {
+            let color = [(index * 4) as u8, 0, 0, 255];
+            for y in 0..height {
+                for x in 0..icon_width {
+                    let start = ((y * width + index * icon_width + x) * 4) as usize;
+                    rgba[start..start + 4].copy_from_slice(&color);
+                }
+            }
+        }
+        Image {
+            width,
+            height,
+            rgba,
+            version: 0,
+        }
+    }
+
+    #[test]
+    fn fits_exactly_borrows_source_pixels() {
+        let image = strip(4, 64, 64);
+        let (width, height, pixels) = upload_pixels(&image, 256).unwrap();
+        assert_eq!((width, height), (256, 64));
+        assert!(matches!(pixels, Cow::Borrowed(_)));
+        assert!(std::ptr::eq(pixels.as_ref(), image.rgba.as_slice()));
+    }
+
+    #[test]
+    fn clamps_axes_independently() {
+        let image = strip(32, 128, 512);
+        assert_eq!((image.width, image.height), (4096, 512));
+        let (width, height, pixels) = upload_pixels(&image, 2048).unwrap();
+        assert_eq!((width, height), (2048, 512));
+        assert!(matches!(pixels, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn all_64_icon_cells_survive_simulated_limits() {
+        let icons = 64;
+        let image = strip(icons, 128, 64);
+        for limit in [2048, 4096] {
+            let (width, height, pixels) = upload_pixels(&image, limit).unwrap();
+            assert_eq!((width, height), (limit, 64));
+            let cell = width / icons;
+            assert_eq!(cell * icons, width);
+            for index in 0..icons {
+                let x = index * cell + cell / 2;
+                let start = ((32 * width + x) * 4) as usize;
+                assert_eq!(
+                    pixels[start],
+                    (index * 4) as u8,
+                    "icon {index} lost at limit {limit}"
+                );
+                assert_eq!(pixels[start + 3], 255);
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_pixel_and_dimension_counts() {
+        let mut image = strip(1, 2, 2);
+        image.rgba.pop();
+        assert!(upload_pixels(&image, 2048).is_err());
+
+        image.width = u32::MAX;
+        image.height = u32::MAX;
+        image.rgba.clear();
+        assert!(upload_pixels(&image, 2048).is_err());
+
+        image.width = 0;
+        image.height = 1;
+        assert!(upload_pixels(&image, 2048).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_limit() {
+        let image = strip(1, 2, 2);
+        assert!(upload_pixels(&image, 0).is_err());
+    }
+
+    #[test]
+    fn failed_upload_keeps_previous_version() {
+        let mut version = Some(1);
+        assert!(commit_upload(&mut version, 2, Err("upload failed".into())).is_err());
+        assert_eq!(version, Some(1));
+        commit_upload(&mut version, 2, Ok(())).unwrap();
+        assert_eq!(version, Some(2));
     }
 }
