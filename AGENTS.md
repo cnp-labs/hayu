@@ -44,7 +44,7 @@ exits non-zero and leaves the running state untouched.
 ## Do not overclaim
 
 - Never write that a V1 capability is implemented, tested, benchmarked, or
-  supported. Only the bar, launcher slice, config validation, and `doctor` exist; docs/TESTING.md and
+  supported as complete V1 features. Implemented prototype slices include the bar, launcher, minimal tray, control IPC, hot reload, config validation and `doctor`; docs/TESTING.md and
   docs/PERFORMANCE.md record that no T-01–T-20 result and no V1 profile measurement
   exists.
 - `docs/DECISIONS.md` is the authority on status: **D-01..D-09 user-decided**,
