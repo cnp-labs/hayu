@@ -10,6 +10,10 @@ Readable information, reachable controls, visible keyboard focus, and brief opti
 
 Launcher open acknowledges the control request without waiting for Hyprland IPC. Before an initial discovery answer, mapping can remain pending so the focused output is selected from a current snapshot rather than guessed. A current failed discovery/snapshot permits fallback to available Wayland outputs; closing or disabling cancels a pending open. A mapped overlay does not follow later focus changes. Closing keeps its surface reusable; disabling or losing its output releases it. Slow workspace IPC must not block keyboard, pointer or redraw dispatch. No visual tokens or layout change accompanies this lifecycle work.
 
+## Prototype tray interactions (HAYU-004, partial)
+
+Left-click activates a drawn tray item. Right-click forwards the item's SNI `ContextMenu` request with a logical screen-coordinate hint; the application presents the menu, not Hayu. A right-click outside a painted tray icon never switches workspaces. Explicit `Passive` status hides the icon and its hit target; `Active`, `NeedsAttention` and unknown/missing status remain visible. Attention-specific styling and a Hayu-rendered DBusMenu are not part of this slice.
+
 ## Prototype tokens
 
 | Token      | Dark    | Light   |

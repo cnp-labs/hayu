@@ -69,14 +69,11 @@ When a monitor disappears, cancel its surfaces/targets before later callbacks ca
 `src/tray.rs` owns a minimal StatusNotifierItem host on a worker thread. It
 requests `org.kde.StatusNotifierWatcher` with `DoNotQueue`, so when another
 host already owns the name the shell logs it, draws nothing and keeps running.
-Items register through the watcher interface; the worker reads `Title`,
-`IconPixmap` and `IconName` once at registration, drops the item when its bus
-name disappears (`NameOwnerChanged`), and sends the list to the UI through a
+Items register through the watcher interface; the worker reads title, icon and status, refreshes from SNI `NewIcon`/`NewTitle`/`NewStatus` and matching item `PropertiesChanged` signals, and tracks the unique sender plus object path. Passive items remain registered but are not drawn or hit-tested; unknown/missing status remains visible. Owner disappearance removes items; owner replacement requires refreshed identity/state. The worker sends the list to the UI through a
 calloop channel. Nothing is polled. The service exists only while an actual bar consumes an enabled tray; reload/output loss stops the last consumer and releases watcher ownership. Stop cancels pending D-Bus calls; normal method calls have a one-second timeout. Theme-icon search, filesystem reads and PNG decoding remain synchronous on the worker. Because stop joins that worker, slow filesystem IO can delay reload/shutdown on the caller; D-Bus cancellation tests establish no total stop-time bound. Generation tags reject messages from stopped lifecycles. Icon pixels use shared `Arc<[u8]>` ownership through snapshots and render inputs; the combined RGBA strip still copies pixels per draw and
 are uploaded only when the strip version changes. Each GLES presenter caches its context's `GL_MAX_TEXTURE_SIZE`; oversized image strips are nearest-centre downsampled independently per axis before upload, while fitting strips borrow their pixels unchanged. Normalized UVs retain icon placement and hit-testing; upload errors propagate without marking the image version current. This bounds GPU dimensions, not the existing bounded CPU strip allocation. `Frame::tray_hits` records
 the rects that were drawn, and a left click queues `Activate(0,0)` on the owned
-tray worker. Saturation reports an error instead of spawning a thread per click. Context menus, scroll and `NewIcon`/`NewTitle` refresh are out of this
-slice. Retained tray items and the registration command queue are capped at 64;
+tray worker. A right click queues the item's SNI `ContextMenu(x, y)` with logical screen-coordinate hints derived from its output/bar position; it never switches a workspace. The application owns menu presentation: no Hayu-rendered DBusMenu host is implemented, and apps without a functional SNI context-menu method may show nothing. Missing output geometry degrades to local coordinate hints. Saturation reports an error instead of spawning a thread per click. Scroll, secondary activation and attention-specific styling remain outside this slice. Retained tray items and the registration command queue are capped at 64;
 icons are at most 512×512 (1 MiB decoded RGBA), and PNG files at most 4 MiB.
 Invalid/oversized icons are ignored, and a full command queue drops new
 registrations with a diagnostic. These bounds do not cap zbus's incoming

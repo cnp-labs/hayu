@@ -19,7 +19,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Modifiers, RawModifiers},
-        pointer::{BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{BTN_LEFT, BTN_RIGHT, PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::WaylandSurface,
     shell::wlr_layer::{
@@ -293,6 +293,55 @@ fn bar_uses_tray(cfg: &Config, output: Option<&str>) -> bool {
         && [&cfg.bar.left, &cfg.bar.center, &cfg.bar.right]
             .iter()
             .any(|modules| modules.iter().any(|module| module == "tray"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BarTarget {
+    Tray(usize),
+    Workspace(i64),
+}
+
+/// What a bar click at `logical_x` hits. The tray wins over a pill, and a
+/// right click only ever reports a tray icon; workspace switching is left-only.
+fn bar_target(
+    tray_hits: &[render::TrayHit],
+    pills: &[render::Pill],
+    logical_x: f32,
+    scale: f32,
+    right: bool,
+) -> Option<BarTarget> {
+    if let Some(id) = render::tray_at(tray_hits, logical_x, scale) {
+        return Some(BarTarget::Tray(id));
+    }
+    if right {
+        return None;
+    }
+    render::pill_at(pills, logical_x, scale).map(BarTarget::Workspace)
+}
+
+/// Logical compositor coordinates for a tray context menu. `pointer` is
+/// surface-local and already logical, so it is not multiplied by the scale.
+/// Missing output geometry falls back to local hints instead of skipping the
+/// menu: the compositor still positions the popup relative to the parent.
+fn tray_menu_position(
+    output_position: Option<(i32, i32)>,
+    output_size: Option<(i32, i32)>,
+    pointer: (f64, f64),
+    bar_height: u32,
+    bottom: bool,
+) -> (i32, i32) {
+    let (output_x, output_y) = output_position.unwrap_or((0, 0));
+    let bar_y = if bottom {
+        output_size
+            .map(|(_, height)| height - bar_height as i32)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    (
+        output_x + pointer.0.round() as i32,
+        output_y + bar_y + pointer.1.round() as i32,
+    )
 }
 
 /// A `%S` needs a per-second timer; `%%S` is a literal percent and does not.
@@ -1269,6 +1318,7 @@ impl State {
         let tray_images: Vec<render::TrayImage> = self
             .tray_items
             .iter()
+            .filter(|item| item.is_visible())
             .filter_map(|item| {
                 item.icon.as_ref().map(|icon| render::TrayImage {
                     id: item.id,
@@ -1541,11 +1591,18 @@ impl PointerHandler for State {
         events: &[PointerEvent],
     ) {
         for event in events {
-            if let PointerEventKind::Press {
-                button: BTN_LEFT, ..
-            } = event.kind
-            {
-                self.click_bar(&event.surface, event.position.0 as f32);
+            match event.kind {
+                PointerEventKind::Press {
+                    button: BTN_LEFT, ..
+                } => self.click_bar(&event.surface, event.position.0 as f32),
+                PointerEventKind::Press {
+                    button: BTN_RIGHT, ..
+                } => self.context_menu(
+                    &event.surface,
+                    event.position.0 as f32,
+                    event.position.1 as f32,
+                ),
+                _ => {}
             }
         }
     }
@@ -1562,27 +1619,71 @@ impl State {
         else {
             return;
         };
-        let scale = bar.scale.max(1.0);
-        if let Some(item) = render::tray_at(&bar.tray_hits, logical_x, scale)
-            .and_then(|id| self.tray_items.iter().find(|item| item.id == id))
-            .cloned()
-        {
-            if let Some(service) = &self.tray_service {
-                match service.activate(&item) {
-                    Ok(()) => {}
-                    Err(tray::ActivateError::Full) => {
-                        eprintln!("hayu: tray activation queue full; activation rejected");
-                    }
-                    Err(tray::ActivateError::Stopped) => {
-                        eprintln!("hayu: tray service stopped; activation dropped");
-                    }
-                }
-            }
-            return;
+        match bar_target(
+            &bar.tray_hits,
+            &bar.pills,
+            logical_x,
+            bar.scale.max(1.0),
+            false,
+        ) {
+            Some(BarTarget::Tray(id)) => self.activate_tray(id),
+            Some(BarTarget::Workspace(id)) => self.switch_workspace(id),
+            None => {}
         }
-        let Some(id) = render::pill_at(&bar.pills, logical_x, scale) else {
+    }
+
+    /// Right click on a bar tray icon. A right click elsewhere on the bar does
+    /// nothing, so it can never switch workspaces.
+    fn context_menu(&mut self, surface: &wl_surface::WlSurface, logical_x: f32, logical_y: f32) {
+        let Some(bar) = self
+            .bars
+            .values()
+            .find(|bar| bar.layer.wl_surface() == surface)
+        else {
             return;
         };
+        let Some(BarTarget::Tray(id)) = bar_target(
+            &bar.tray_hits,
+            &bar.pills,
+            logical_x,
+            bar.scale.max(1.0),
+            true,
+        ) else {
+            return;
+        };
+        let output = bar.output.clone();
+        let (bottom, height) = (bar.bottom, bar.height);
+        let Some(item) = self.tray_items.iter().find(|item| item.id == id) else {
+            return;
+        };
+        let Some(service) = &self.tray_service else {
+            return;
+        };
+        let info = self.output_state.info(&output);
+        let (x, y) = tray_menu_position(
+            info.as_ref().and_then(|info| info.logical_position),
+            info.as_ref().and_then(|info| info.logical_size),
+            (logical_x as f64, logical_y as f64),
+            height,
+            bottom,
+        );
+        report_tray_action(
+            "context menu",
+            service.context_menu(&item.service, &item.path, x, y),
+        );
+    }
+
+    fn activate_tray(&mut self, id: usize) {
+        let Some(item) = self.tray_items.iter().find(|item| item.id == id) else {
+            return;
+        };
+        let Some(service) = &self.tray_service else {
+            return;
+        };
+        report_tray_action("activation", service.activate(item));
+    }
+
+    fn switch_workspace(&mut self, id: i64) {
         if id == self.active_workspace {
             return;
         }
@@ -1591,6 +1692,18 @@ impl State {
         };
         if service.switch_workspace(id).is_err() {
             eprintln!("hayu: Hyprland action queue full; workspace switch rejected for {id}");
+        }
+    }
+}
+
+fn report_tray_action(action: &str, result: Result<(), tray::ActivateError>) {
+    match result {
+        Ok(()) => {}
+        Err(tray::ActivateError::Full) => {
+            eprintln!("hayu: tray {action} queue full; request rejected");
+        }
+        Err(tray::ActivateError::Stopped) => {
+            eprintln!("hayu: tray service stopped; {action} dropped");
         }
     }
 }
@@ -2001,5 +2114,60 @@ mod tests {
         assert_eq!(launcher_map_decision(true, false, false), LauncherMap::Now);
         // No service at all: nothing is owed.
         assert_eq!(launcher_map_decision(false, false, true), LauncherMap::Now);
+    }
+    #[test]
+    fn tray_menu_uses_logical_output_and_bar_origin() {
+        let top = tray_menu_position(
+            Some((1920, 0)),
+            Some((1920, 1080)),
+            (100.0, 10.0),
+            40,
+            false,
+        );
+        assert_eq!(top, (2020, 10));
+        let bottom =
+            tray_menu_position(Some((1920, 0)), Some((1920, 1080)), (100.0, 10.0), 40, true);
+        assert_eq!(bottom, (2020, 1050));
+        // Negative output origins stay negative and fractional coords round once.
+        let left = tray_menu_position(
+            Some((-1920, 120)),
+            Some((1920, 1080)),
+            (12.6, 3.4),
+            40,
+            true,
+        );
+        assert_eq!(left, (-1907, 1163));
+        // Missing output position or size falls back to local hints, no panic.
+        assert_eq!(
+            tray_menu_position(None, Some((1920, 1080)), (5.0, 6.0), 40, true),
+            (5, 1046)
+        );
+        assert_eq!(
+            tray_menu_position(Some((10, 20)), None, (5.0, 6.0), 40, true),
+            (15, 26)
+        );
+    }
+    #[test]
+    fn right_click_routes_tray_only_and_never_a_workspace() {
+        let tray = [render::TrayHit {
+            id: 7,
+            x: 0.0,
+            w: 20.0,
+        }];
+        let pills = [render::Pill {
+            id: 3,
+            x: 0.0,
+            w: 100.0,
+        }];
+        assert_eq!(
+            bar_target(&tray, &pills, 5.0, 1.0, true),
+            Some(BarTarget::Tray(7))
+        );
+        // A right click on a pill alone is not a workspace action.
+        assert_eq!(bar_target(&[], &pills, 5.0, 1.0, true), None);
+        assert_eq!(
+            bar_target(&[], &pills, 5.0, 1.0, false),
+            Some(BarTarget::Workspace(3))
+        );
     }
 }

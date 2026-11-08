@@ -40,6 +40,10 @@ Discover exact protocol names/revisions from globals on the target machine and r
 
 Runtime Hyprland requests are owned by the asynchronous adapter, not widgets. Workspace actions retain legacy-first dispatch and use the Lua fallback only for an explicit rejection, not a transport timeout. Optional tray ownership follows actual bar consumers and hot reload; another watcher is never displaced. Disabled launcher releases its surface/catalogue/accessibility adapter. These implementation contracts do not upgrade the historical evidence rows below to new test results; current follow-up checks must be recorded separately.
 
+## Tray signal/menu compatibility follow-up
+
+The prototype refreshes SNI icons/title/status from item signals and filtered `PropertiesChanged`; signal identity uses the unique bus owner plus object path. Explicit `Passive` status hides items. Right-click forwards the item's `ContextMenu(x, y)` method; applications that require a host-rendered DBusMenu or do not present a menu from this method may show nothing. This is not full HAYU-004 DBusMenu support. Targeted private-bus tests cover refresh and method forwarding, not a new real-application menu compatibility matrix. Historical rows below retain their original limitations.
+
 ## Services and packaging
 
 Finalize dependencies after selecting the renderer/libraries. Candidates include Wayland, text/font, GPU backend, D-Bus, audio, and image-decoder libraries. Do not publish a PKGBUILD with guessed dependencies.

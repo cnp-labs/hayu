@@ -20,6 +20,12 @@ The GLES presenter queries `GL_MAX_TEXTURE_SIZE` once with its context current. 
 
 Validation: `cargo test --locked` passed 96 tests; `cargo test --all-features --locked` passed 99. Default release and `gpu-spike` release builds, touched-file formatting and private-bus live tray checks (13/13) passed. `cargo clippy --all-targets --all-features --locked` exited 0 with existing warnings; this was not a strict `-D warnings` pass. No renderer-GL warning appeared. Live tray used ordinary fcitx5 icons, not the synthetic maximum-size fixture.
 
+## Everyday tray follow-up (HAYU-004, partial)
+
+Signal-driven refresh handles `NewIcon`, `NewTitle`, `NewStatus` and item-interface `PropertiesChanged`, scoped by unique sender and object path. Failed property reads retain last-known values. Only explicit `Passive` items are hidden; unknown/missing status stays visible. Right-click forwards SNI `ContextMenu` with logical screen-coordinate hints and cannot switch workspaces. The application must present its own menu: DBusMenu hosting/rendering, scroll, secondary activation and attention styling remain incomplete.
+
+Targeted checks only: the single texture regression now uses the full 32,768×512 source (64 icons at 512×512) and passes; tray tests pass 14/14, including a private-bus fake item proving icon/status/property refresh, signal identity isolation and exact context-menu coordinates. App tests pass 11/11, including top/bottom/negative/missing output geometry and right-click routing. No full suite, benchmark or live application-menu compatibility pass is claimed for this follow-up.
+
 ## Testing layers
 
 - Unit: schema/config diffs, state reducers, queue caps, geometry/layout, hit testing, clock, desktop entry rules, app identity, history eviction.

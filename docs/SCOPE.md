@@ -24,7 +24,7 @@ D-12 approves lifecycle responsibilities: core is bar/workspaces/clock/title plu
 | Notifications | Toasts, actions, DND, bounded session history | Disk persistence and online service integrations |
 
 These refinements can be expanded through documented changes. User-selected feature categories must not be removed merely to reduce implementation effort.
-Status: only the bar, launcher search, config validation and `doctor` exist. The bar draws `workspaces`, `clock`, `active_window` and tray items; the launcher, media, audio, network, battery, notifications and control_center IDs are validated and draw nothing. The tray has no menus yet, so HAYU-001 and HAYU-004 remain incomplete.
+Status: prototype slices include the bar, launcher search, minimal tray, hot reload, control IPC, config validation and `doctor`. The bar draws `workspaces`, `clock`, `active_window` and tray items; the launcher, media, audio, network, battery, notifications and control_center widget IDs are validated and draw nothing. Tray supports signal-driven icon/status refresh and forwards right-click SNI `ContextMenu` requests to the application; it does not host/render DBusMenu. HAYU-001 and HAYU-004 remain incomplete.
 
 
 ## Outside V1

@@ -1,10 +1,11 @@
 //! Minimal StatusNotifierItem host: own `org.kde.StatusNotifierWatcher` when
 //! nobody else does, follow registered items, and activate them on demand.
 //!
-//! Deliberately small: no context menus, no scroll, no NewIcon/NewTitle
-//! signals. An item's icon and title are read when it registers and when its
-//! bus name disappears. Another host is never displaced.
+//! Deliberately small: no scroll, no DBusMenu renderer. Item properties are
+//! read when an item registers and refreshed from NewIcon/NewTitle/NewStatus
+//! and PropertiesChanged. Another host is never displaced.
 use futures_lite::StreamExt;
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -26,9 +27,19 @@ const MAX_PNG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 pub struct TrayItem {
     pub id: usize,
     pub title: String,
+    /// SNI `Status`; empty when the item did not report one.
+    pub status: String,
     pub service: String,
     pub path: String,
     pub icon: Option<Icon>,
+}
+
+impl TrayItem {
+    /// SNI only hides an explicit `Passive` item. Missing or unknown values
+    /// stay visible so a broken item does not silently disappear.
+    pub fn is_visible(&self) -> bool {
+        self.status != "Passive"
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,23 +105,42 @@ impl Service {
     }
 
     pub fn activate(&self, item: &TrayItem) -> Result<(), ActivateError> {
+        self.enqueue(Command::Activate {
+            service: item.service.clone(),
+            path: item.path.clone(),
+        })
+    }
+
+    /// Forward a right-click to the item's SNI `ContextMenu` method. Drawing a
+    /// DBusMenu is deliberately still out of scope.
+    pub fn context_menu(
+        &self,
+        service: &str,
+        path: &str,
+        x: i32,
+        y: i32,
+    ) -> Result<(), ActivateError> {
+        self.enqueue(Command::ContextMenu {
+            service: service.to_string(),
+            path: path.to_string(),
+            x,
+            y,
+        })
+    }
+
+    fn enqueue(&self, command: Command) -> Result<(), ActivateError> {
         let Some((commands, _, worker)) = &self.worker else {
             return Err(ActivateError::Stopped);
         };
-        // A finished worker leaves the sender alive, so a queued activation
+        // A finished worker leaves the sender alive, so a queued command
         // would be accepted and silently dropped. Report it instead.
         if worker.is_finished() {
             return Err(ActivateError::Stopped);
         }
-        commands
-            .try_send(Command::Activate {
-                service: item.service.clone(),
-                path: item.path.clone(),
-            })
-            .map_err(|error| match error {
-                async_channel::TrySendError::Full(_) => ActivateError::Full,
-                async_channel::TrySendError::Closed(_) => ActivateError::Stopped,
-            })
+        commands.try_send(command).map_err(|error| match error {
+            async_channel::TrySendError::Full(_) => ActivateError::Full,
+            async_channel::TrySendError::Closed(_) => ActivateError::Stopped,
+        })
     }
 
     pub fn stop(&mut self) {
@@ -198,15 +228,48 @@ async fn run_with_connection(
         .await
         .map_err(|error| format!("cannot watch bus names: {error}"))?;
 
+    let item_signals_rule = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface(ITEM_INTERFACE)
+        .map_err(|error| error.to_string())?
+        .build();
+    let mut item_signals = zbus::MessageStream::for_match_rule(item_signals_rule, &conn, Some(256))
+        .await
+        .map_err(|error| format!("cannot watch tray item signals: {error}"))?;
+
+    let property_signals_rule = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface("org.freedesktop.DBus.Properties")
+        .map_err(|error| error.to_string())?
+        .member("PropertiesChanged")
+        .map_err(|error| error.to_string())?
+        .arg(0, ITEM_INTERFACE)
+        .map_err(|error| error.to_string())?
+        .build();
+    let mut property_signals =
+        zbus::MessageStream::for_match_rule(property_signals_rule, &conn, Some(256))
+            .await
+            .map_err(|error| format!("cannot watch tray property signals: {error}"))?;
+
     let mut items: Vec<Item> = Vec::new();
     loop {
         enum Incoming {
             Change(Option<zbus::Message>),
+            Signal(Option<zbus::Message>),
+            PropertySignal(Option<zbus::Message>),
             Command(Option<Command>),
         }
         let incoming = futures_lite::future::or(
             async { Incoming::Change(changes.next().await.and_then(Result::ok)) },
-            async { Incoming::Command(cmd_rx.recv().await.ok()) },
+            futures_lite::future::or(
+                async { Incoming::Signal(item_signals.next().await.and_then(Result::ok)) },
+                futures_lite::future::or(
+                    async {
+                        Incoming::PropertySignal(property_signals.next().await.and_then(Result::ok))
+                    },
+                    async { Incoming::Command(cmd_rx.recv().await.ok()) },
+                ),
+            ),
         )
         .await;
         let mut changed = false;
@@ -214,6 +277,14 @@ async fn run_with_connection(
             Incoming::Command(None) => break,
             Incoming::Command(Some(Command::Activate { service, path })) => {
                 activate_on_bus(&conn, &service, &path).await;
+            }
+            Incoming::Command(Some(Command::ContextMenu {
+                service,
+                path,
+                x,
+                y,
+            })) => {
+                context_menu_on_bus(&conn, &service, &path, x, y).await;
             }
             Incoming::Command(Some(Command::Register { service, bus })) => {
                 if let Some(item) = read_item(&conn, &service, &bus).await {
@@ -228,18 +299,47 @@ async fn run_with_connection(
                 }
             }
             Incoming::Change(Some(message)) => {
-                if let Some(signal) = NameOwnerChanged::from_message(message) {
-                    if let Ok(args) = signal.args()
-                        && args.new_owner().is_none()
-                    {
-                        let bus = args.name().to_string();
-                        let before = items.len();
-                        items.retain(|item| item.bus != bus);
-                        changed = items.len() != before;
+                if let Some(signal) = NameOwnerChanged::from_message(message)
+                    && let Ok(args) = signal.args()
+                {
+                    let bus = args.name().to_string();
+                    match &**args.new_owner() {
+                        None => {
+                            let before = items.len();
+                            items.retain(|item| item.bus != bus);
+                            changed = items.len() != before;
+                        }
+                        Some(owner) => {
+                            let owner = owner.to_string();
+                            for item in items.iter_mut().filter(|item| item.bus == bus) {
+                                if item.owner != owner {
+                                    item.owner = owner.clone();
+                                    refresh_item(
+                                        &conn,
+                                        item,
+                                        &[Part::Title, Part::Icon, Part::Status],
+                                    )
+                                    .await;
+                                    changed = true;
+                                }
+                            }
+                        }
                     }
                 }
             }
-            Incoming::Change(None) => break,
+            Incoming::Signal(Some(message)) | Incoming::PropertySignal(Some(message)) => {
+                if let Some((sender, path, parts)) = signal_target_and_parts(&message)
+                    && let Some(item) = items
+                        .iter_mut()
+                        .find(|item| item.owner == sender && item.path == path)
+                {
+                    refresh_item(&conn, item, &parts).await;
+                    changed = true;
+                }
+            }
+            Incoming::Signal(None) | Incoming::PropertySignal(None) | Incoming::Change(None) => {
+                break;
+            }
         }
         if changed {
             *registered.lock().unwrap() =
@@ -250,6 +350,7 @@ async fn run_with_connection(
                 .map(|(id, item)| TrayItem {
                     id,
                     title: item.title.clone(),
+                    status: item.status.clone(),
                     service: item.service.clone(),
                     path: item.path.clone(),
                     icon: item.icon.clone(),
@@ -274,15 +375,38 @@ struct Item {
     registered: String,
     /// Canonical bus name for activation; never a path or `bus/path`.
     service: String,
+    /// The name the bus reports for this item; watched for owner changes.
     bus: String,
+    /// Unique name currently owning `service`; signals only match this.
+    owner: String,
     path: String,
     title: String,
+    status: String,
     icon: Option<Icon>,
 }
 
 enum Command {
-    Register { service: String, bus: String },
-    Activate { service: String, path: String },
+    Register {
+        service: String,
+        bus: String,
+    },
+    Activate {
+        service: String,
+        path: String,
+    },
+    ContextMenu {
+        service: String,
+        path: String,
+        x: i32,
+        y: i32,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Title,
+    Icon,
+    Status,
 }
 
 struct Watcher {
@@ -370,33 +494,147 @@ async fn read_item(conn: &Connection, service: &str, bus: &str) -> Option<Item> 
         }
     };
     let title: String = proxy.get_property("Title").await.unwrap_or_default();
-    let icon = match proxy
-        .get_property::<Vec<(i32, i32, Vec<u8>)>>("IconPixmap")
-        .await
-    {
-        Ok(pixmaps) => pixmap_icon(&pixmaps).or_else(|| {
-            // The name is only a fallback; a provided pixmap always wins.
-            None
-        }),
-        Err(_) => None,
-    };
-    let icon = match icon {
-        Some(icon) => Some(icon),
-        None => proxy
-            .get_property::<String>("IconName")
-            .await
-            .ok()
-            .filter(|name| !name.is_empty())
-            .and_then(|name| theme_icon(&name)),
-    };
+    let status: String = proxy.get_property("Status").await.unwrap_or_default();
+    let icon = fetch_icon(&proxy).await.ok().flatten();
+    let owner = name_owner(conn, &bus_name).await;
     Some(Item {
         registered: service.to_string(),
         service: bus_name.clone(),
         bus: bus_name,
+        owner,
         path,
         title,
+        status,
         icon,
     })
+}
+
+/// Resolve a well-known name to the unique connection that owns it. Signals
+/// arrive from the unique name, so that is what items are matched against.
+async fn name_owner(conn: &Connection, name: &str) -> String {
+    if name.starts_with(':') {
+        return name.to_string();
+    }
+    let Ok(proxy) = zbus::fdo::DBusProxy::new(conn).await else {
+        return name.to_string();
+    };
+    let Ok(name) = zbus::names::BusName::try_from(name) else {
+        return name.to_string();
+    };
+    proxy
+        .get_name_owner(name)
+        .await
+        .map(|owner| owner.to_string())
+        .unwrap_or_default()
+}
+
+/// Refresh only the requested properties. A failed call keeps the last known
+/// value instead of blanking the item.
+async fn refresh_item(conn: &Connection, item: &mut Item, parts: &[Part]) {
+    let destination = if item.owner.is_empty() {
+        item.service.as_str()
+    } else {
+        item.owner.as_str()
+    };
+    let proxy = match Proxy::new(conn, destination, item.path.as_str(), ITEM_INTERFACE).await {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            eprintln!(
+                "hayu: tray item {} refresh unavailable: {error}",
+                item.service
+            );
+            return;
+        }
+    };
+    for part in parts {
+        match part {
+            Part::Title => {
+                if let Ok(title) = proxy.get_property::<String>("Title").await {
+                    item.title = title;
+                }
+            }
+            Part::Status => {
+                if let Ok(status) = proxy.get_property::<String>("Status").await {
+                    item.status = status;
+                }
+            }
+            Part::Icon => {
+                if let Ok(icon) = fetch_icon(&proxy).await {
+                    item.icon = icon;
+                }
+            }
+        }
+    }
+}
+
+/// The pixmap wins when it decodes; otherwise a theme PNG named by `IconName`
+/// is used. Both property calls failing is an error, not an empty icon.
+async fn fetch_icon(proxy: &Proxy<'_>) -> zbus::Result<Option<Icon>> {
+    let pixmaps = proxy
+        .get_property::<Vec<(i32, i32, Vec<u8>)>>("IconPixmap")
+        .await;
+    if let Ok(pixmaps) = &pixmaps
+        && let Some(icon) = pixmap_icon(pixmaps)
+    {
+        return Ok(Some(icon));
+    }
+    let name = proxy.get_property::<String>("IconName").await;
+    if let Ok(name) = &name
+        && !name.is_empty()
+        && let Some(icon) = theme_icon(name)
+    {
+        return Ok(Some(icon));
+    }
+    match (pixmaps, name) {
+        (Err(error), Err(_)) => Err(error),
+        _ => Ok(None),
+    }
+}
+
+/// Sender, path, and the smallest property set a signal asks us to re-read.
+fn signal_target_and_parts(message: &zbus::Message) -> Option<(String, String, Vec<Part>)> {
+    let header = message.header();
+    let sender = header.sender()?.to_string();
+    let path = header.path()?.to_string();
+    let interface = header.interface()?.as_str();
+    let member = header.member()?.as_str();
+    let parts = match (interface, member) {
+        (ITEM_INTERFACE, "NewIcon") => vec![Part::Icon],
+        (ITEM_INTERFACE, "NewTitle") => vec![Part::Title],
+        (ITEM_INTERFACE, "NewStatus") => vec![Part::Status],
+        ("org.freedesktop.DBus.Properties", "PropertiesChanged") => {
+            let (changed_interface, changed, invalidated): (
+                String,
+                HashMap<String, zbus::zvariant::OwnedValue>,
+                Vec<String>,
+            ) = message.body().deserialize().ok()?;
+            if changed_interface != ITEM_INTERFACE {
+                return None;
+            }
+            let mut parts = Vec::new();
+            for name in changed
+                .keys()
+                .map(String::as_str)
+                .chain(invalidated.iter().map(String::as_str))
+            {
+                let part = match name {
+                    "Title" => Part::Title,
+                    "Status" => Part::Status,
+                    "IconPixmap" | "IconName" | "IconThemePath" => Part::Icon,
+                    _ => continue,
+                };
+                if !parts.contains(&part) {
+                    parts.push(part);
+                }
+            }
+            parts
+        }
+        _ => return None,
+    };
+    if parts.is_empty() {
+        return None;
+    }
+    Some((sender, path, parts))
 }
 
 fn pixmap_len(width: i32, height: i32) -> Option<usize> {
@@ -565,6 +803,17 @@ async fn activate_on_bus(conn: &Connection, service: &str, path: &str) {
     }
 }
 
+async fn context_menu_on_bus(conn: &Connection, service: &str, path: &str, x: i32, y: i32) {
+    let result = async {
+        let proxy = Proxy::new(conn, service, path, ITEM_INTERFACE).await?;
+        proxy.call_method("ContextMenu", &(x, y)).await.map(|_| ())
+    }
+    .await;
+    if let Err(error) = result {
+        eprintln!("hayu: tray context menu failed: {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,6 +875,64 @@ mod tests {
             self.activate_started.signal();
             std::future::pending().await
         }
+    }
+
+    type FakePixmaps = Vec<(i32, i32, Vec<u8>)>;
+
+    struct FakeItem {
+        title: Arc<Mutex<String>>,
+        status: Arc<Mutex<String>>,
+        pixmap: Arc<Mutex<FakePixmaps>>,
+        menu: Arc<Mutex<Option<(i32, i32)>>>,
+    }
+
+    #[interface(name = "org.kde.StatusNotifierItem")]
+    impl FakeItem {
+        #[zbus(property)]
+        async fn title(&self) -> String {
+            self.title.lock().unwrap().clone()
+        }
+
+        #[zbus(property)]
+        async fn status(&self) -> String {
+            self.status.lock().unwrap().clone()
+        }
+
+        #[zbus(property)]
+        async fn icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
+            self.pixmap.lock().unwrap().clone()
+        }
+
+        async fn context_menu(&self, x: i32, y: i32) {
+            *self.menu.lock().unwrap() = Some((x, y));
+        }
+
+        #[zbus(signal)]
+        async fn new_icon(emitter: &zbus::object_server::SignalEmitter<'_>) -> zbus::Result<()>;
+
+        #[zbus(signal)]
+        async fn new_status(emitter: &zbus::object_server::SignalEmitter<'_>) -> zbus::Result<()>;
+    }
+
+    fn wait_items(
+        rx: &calloop::channel::Channel<Message>,
+        timeout: std::time::Duration,
+    ) -> Option<Vec<TrayItem>> {
+        let end = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < end {
+            match rx.try_recv() {
+                Ok(Message {
+                    event: Event::Items(items),
+                    ..
+                }) => return Some(items),
+                Ok(_) => {}
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return None,
+            }
+        }
+        None
     }
 
     struct PrivateBus(Child);
@@ -697,6 +1004,148 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         false
+    }
+
+    #[test]
+    fn signals_refresh_item_and_context_menu_forwards_coords() {
+        let _lock = DBUS_TEST_LOCK.lock().unwrap();
+        let (_daemon, address) = PrivateBus::start();
+        let owner = zbus::block_on(
+            zbus::connection::Builder::address(address.as_str())
+                .unwrap()
+                .build(),
+        )
+        .expect("private bus connection");
+        let unique = owner.unique_name().expect("unique name").to_string();
+
+        let title = Arc::new(Mutex::new("Initial".to_string()));
+        let status = Arc::new(Mutex::new("Mystery".to_string()));
+        let pixmap = Arc::new(Mutex::new(vec![(1, 1, vec![0xFF, 0x00, 0x00, 0xFF])]));
+        let menu = Arc::new(Mutex::new(None));
+        zbus::block_on(owner.object_server().at(
+            "/FakeItem",
+            FakeItem {
+                title: title.clone(),
+                status: status.clone(),
+                pixmap: pixmap.clone(),
+                menu: menu.clone(),
+            },
+        ))
+        .expect("serve fake item");
+        zbus::block_on(owner.object_server().at(
+            "/OtherItem",
+            FakeItem {
+                title: Arc::new(Mutex::new("Other".into())),
+                status: Arc::new(Mutex::new("Active".into())),
+                pixmap: Arc::new(Mutex::new(Vec::new())),
+                menu: Arc::new(Mutex::new(None)),
+            },
+        ))
+        .expect("serve other item");
+
+        let other_owner = zbus::block_on(
+            zbus::connection::Builder::address(address.as_str())
+                .unwrap()
+                .build(),
+        )
+        .expect("second private bus connection");
+        zbus::block_on(other_owner.object_server().at(
+            "/FakeItem",
+            FakeItem {
+                title: Arc::new(Mutex::new("Impostor".into())),
+                status: Arc::new(Mutex::new("Passive".into())),
+                pixmap: Arc::new(Mutex::new(Vec::new())),
+                menu: Arc::new(Mutex::new(None)),
+            },
+        ))
+        .expect("serve impostor item");
+
+        let (tx, rx) = calloop::channel::channel::<Message>();
+        let mut service =
+            Service::start_with_address(11, tx, Some(address.clone())).expect("start tray");
+        service
+            .worker
+            .as_ref()
+            .expect("worker")
+            .0
+            .try_send(Command::Register {
+                service: "/FakeItem".into(),
+                bus: unique.clone(),
+            })
+            .expect("queue fake registration");
+
+        let items = wait_items(&rx, std::time::Duration::from_secs(2)).expect("initial snapshot");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Initial");
+        assert_eq!(items[0].status, "Mystery");
+        assert!(items[0].is_visible(), "unknown status stays visible");
+        let mut missing_status = items[0].clone();
+        missing_status.status.clear();
+        assert!(missing_status.is_visible(), "missing status stays visible");
+        assert_eq!(items[0].icon.as_ref().map(|icon| icon.width), Some(1));
+
+        let emitter =
+            zbus::object_server::SignalEmitter::new(&owner, "/FakeItem").expect("item emitter");
+        *pixmap.lock().unwrap() = vec![(2, 1, vec![0; 8])];
+        zbus::block_on(FakeItem::new_icon(&emitter)).expect("emit NewIcon");
+        let items = wait_items(&rx, std::time::Duration::from_secs(2)).expect("icon snapshot");
+        let icon = items[0].icon.clone().expect("refreshed icon");
+        assert_eq!(icon.width, 2);
+
+        *status.lock().unwrap() = "Passive".into();
+        zbus::block_on(FakeItem::new_status(&emitter)).expect("emit NewStatus");
+        let items = wait_items(&rx, std::time::Duration::from_secs(2)).expect("status snapshot");
+        assert_eq!(items[0].status, "Passive");
+        assert!(!items[0].is_visible(), "Passive status is hidden");
+        assert!(
+            Arc::ptr_eq(&items[0].icon.as_ref().expect("kept icon").rgba, &icon.rgba),
+            "a status-only update keeps the pixel buffer"
+        );
+
+        *title.lock().unwrap() = "Updated".into();
+        let changed: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+        zbus::block_on(zbus::fdo::Properties::properties_changed(
+            &emitter,
+            zbus::names::InterfaceName::try_from(ITEM_INTERFACE).unwrap(),
+            changed,
+            vec!["Title"].into(),
+        ))
+        .expect("emit PropertiesChanged");
+        let items = wait_items(&rx, std::time::Duration::from_secs(2)).expect("property snapshot");
+        assert_eq!(items[0].title, "Updated");
+
+        let other_emitter =
+            zbus::object_server::SignalEmitter::new(&owner, "/OtherItem").expect("other emitter");
+        zbus::block_on(FakeItem::new_status(&other_emitter)).expect("emit other-path status");
+        assert!(
+            wait_items(&rx, std::time::Duration::from_millis(250)).is_none(),
+            "a signal from another path must not refresh the item"
+        );
+
+        let impostor_emitter = zbus::object_server::SignalEmitter::new(&other_owner, "/FakeItem")
+            .expect("impostor emitter");
+        zbus::block_on(FakeItem::new_status(&impostor_emitter)).expect("emit impostor status");
+        assert!(
+            wait_items(&rx, std::time::Duration::from_millis(250)).is_none(),
+            "a signal from another sender must not refresh the item"
+        );
+
+        service
+            .context_menu(&unique, "/FakeItem", 17, -42)
+            .expect("queue context menu");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let coords = loop {
+            if let Some(coords) = *menu.lock().unwrap() {
+                break Some(coords);
+            }
+            if std::time::Instant::now() >= end {
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(coords, Some((17, -42)));
+        service.stop();
+        assert!(wait_for_name_release(&address), "name not released");
     }
 
     #[test]
@@ -799,6 +1248,7 @@ mod tests {
         let item = TrayItem {
             id: 0,
             title: String::new(),
+            status: String::new(),
             service: "org.example.SlowItem".into(),
             path: "/SlowItem".into(),
             icon: None,
@@ -854,6 +1304,7 @@ mod tests {
         let item = TrayItem {
             id: 0,
             title: String::new(),
+            status: String::new(),
             service: "org.example.Item".into(),
             path: DEFAULT_ITEM_PATH.into(),
             icon: None,
@@ -867,6 +1318,7 @@ mod tests {
         let item = TrayItem {
             id: 0,
             title: String::new(),
+            status: String::new(),
             service: "org.example.Item".into(),
             path: DEFAULT_ITEM_PATH.into(),
             icon: None,
