@@ -2,6 +2,17 @@
 
 Status: prototype measurements and benchmark plan. Historical prototype/spike results below are measurements with limited scope; candidate budgets are hypotheses, not achieved performance claims. No full Core, V1 normal or V1 stress benchmark has been completed. The November 7 refocus comparison is recorded separately below.
 
+## November 8 consumer-owned lifecycle comparison
+
+Same-session isolated comparison, not a V1 profile benchmark. Preserved earlier artifact SHA-256 `8092aee8312ad353a4aa18f81b301c121a1d5cd3c134c1374663b3baaad3e776` versus updated release `4ef082475d6ddd550b7be58c72c57b558a567dcf0213b1ca442a7fea343e048e`. The earlier hash identifies the November 7 artifact, not a freshly rebuilt HEAD baseline. Each profile/binary ran once, warmed for two seconds, then sampled three times at ten-second intervals. Both used the same profile config and compositor session; core had one PID-filtered bar layer, off had none. Launcher and tray were disabled. User shell PID/control-socket inode stayed unchanged.
+
+| Profile | Earlier PSS kB | Updated PSS kB | Earlier threads | Updated threads |
+| --- | --- | --- | --- | --- |
+| Core bar: workspaces/title/minute clock | 43,961 | 41,550–41,559 | 18 | 14 |
+| Bar/launcher/tray disabled | 8,314–8,315 | 6,049–6,051 | 5 | 1 |
+
+These local samples show lower PSS/thread counts, not a general performance guarantee. PSS depends on shared mappings and the surrounding session. Cumulative user+system ticks stayed 17 across all core samples and 7 across all off samples for both artifacts; this establishes no CPU-speed improvement. No latency distribution, clean-build comparison, repeated-run variance, full V1 workload or screen-reader performance was measured. Raw evidence: `/tmp/opencode/hayu-lifecycle/resource-20261108-132109-a68LJS/`, `samples.tsv` SHA-256 `f4c0d564c336d3f7c7c2b3e3c9958ee88ba1a89fa9f029a0a9f564354680e510`. Temporary artifacts are not durable repository evidence; the scoped observations and binary identities are retained here.
+
 ## November 7 refocus build comparison
 
 Initial binary of `ab9e678` was preserved before rebuild (SHA-256 `35f353fa58b4200c1b3077d381d9bca423cd7fae7c77e2d1d57d359e8bd2d542`), 13,895,120 bytes. Default release at `740569b` is 13,373,488 bytes: 521,632 bytes smaller (3.75%). This is one local unstripped artifact comparison, not installed/package size or runtime memory savings. Production normal/build dependency nodes decrease from 185 to 178 using unique package name/version pairs; optional experiments remain locked but are not default production dependencies.
@@ -33,7 +44,7 @@ Idle surfaces do not draw continuously; the clock updates only at its required p
 
 | Profile | Contents |
 | --- | --- |
-| Core | One bar, minute clock, workspaces/title, available but closed launcher; all other modules off |
+| Core | One bar, minute clock, workspaces/title, launcher disabled; all optional modules off (D-12). Historical prototype runs with an enabled closed launcher are not this profile |
 | V1 normal | Every V1 feature category active; clipboard opt-in enabled specifically for testing; static wallpaper; one idle player and several tray items |
 | V1 stress | Two mixed-scale monitors, history at cap, event/notification bursts, open launcher/picker, cold thumbnails |
 
