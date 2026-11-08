@@ -8,6 +8,7 @@ use futures_lite::StreamExt;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use zbus::fdo::{NameOwnerChanged, RequestNameFlags, RequestNameReply};
 use zbus::message::Header;
 use zbus::{Connection, MatchRule, Proxy, interface};
@@ -34,7 +35,13 @@ pub struct TrayItem {
 pub struct Icon {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub rgba: Arc<[u8]>,
+}
+
+#[derive(Debug)]
+pub struct Message {
+    pub generation: u64,
+    pub event: Event,
 }
 
 #[derive(Debug)]
@@ -44,23 +51,117 @@ pub enum Event {
     Disabled(String),
 }
 
-/// Own the watcher name and follow items on a worker thread. Every outcome is
-/// reported through `tx`; the UI never talks to the bus itself.
-pub fn spawn(tx: calloop::channel::Sender<Event>) {
-    std::thread::Builder::new()
-        .name("hayu-tray".into())
-        .spawn(move || {
-            if let Err(error) = zbus::block_on(run(tx.clone())) {
-                let _ = tx.send(Event::Disabled(error));
-            }
-        })
-        .ok();
+/// Inert until started. Owns at most one worker; stop joins it before restart.
+pub struct Service {
+    worker: Option<(
+        async_channel::Sender<Command>,
+        async_channel::Sender<()>,
+        JoinHandle<()>,
+    )>,
 }
 
-async fn run(tx: calloop::channel::Sender<Event>) -> Result<(), String> {
-    let conn = Connection::session()
+impl Service {
+    pub fn start(generation: u64, tx: calloop::channel::Sender<Message>) -> Result<Self, String> {
+        Self::start_with_address(generation, tx, None)
+    }
+
+    fn start_with_address(
+        generation: u64,
+        tx: calloop::channel::Sender<Message>,
+        address: Option<String>,
+    ) -> Result<Self, String> {
+        let mut service = Self { worker: None };
+        let (cmd_tx, cmd_rx) = async_channel::bounded(MAX_ITEMS);
+        let (cancel_tx, cancel_rx) = async_channel::bounded::<()>(1);
+        let worker_tx = cmd_tx.clone();
+        let handle = thread::Builder::new()
+            .name("hayu-tray".into())
+            .spawn(move || {
+                let worker = run(generation, tx.clone(), cmd_tx, cmd_rx, address);
+                if let Err(error) = zbus::block_on(futures_lite::future::race(worker, async {
+                    let _ = cancel_rx.recv().await;
+                    Ok(())
+                })) {
+                    let _ = tx.send(Message {
+                        generation,
+                        event: Event::Disabled(error),
+                    });
+                }
+            })
+            .map_err(|error| format!("cannot spawn tray worker: {error}"))?;
+        service.worker = Some((worker_tx, cancel_tx, handle));
+        Ok(service)
+    }
+
+    pub fn activate(&self, item: &TrayItem) -> Result<(), ActivateError> {
+        let Some((commands, _, worker)) = &self.worker else {
+            return Err(ActivateError::Stopped);
+        };
+        // A finished worker leaves the sender alive, so a queued activation
+        // would be accepted and silently dropped. Report it instead.
+        if worker.is_finished() {
+            return Err(ActivateError::Stopped);
+        }
+        commands
+            .try_send(Command::Activate {
+                service: item.service.clone(),
+                path: item.path.clone(),
+            })
+            .map_err(|error| match error {
+                async_channel::TrySendError::Full(_) => ActivateError::Full,
+                async_channel::TrySendError::Closed(_) => ActivateError::Stopped,
+            })
+    }
+
+    pub fn stop(&mut self) {
+        if let Some((commands, cancel, worker)) = self.worker.take() {
+            let _ = cancel.try_send(());
+            drop(cancel);
+            drop(commands);
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ActivateError {
+    Stopped,
+    Full,
+}
+
+async fn run(
+    generation: u64,
+    tx: calloop::channel::Sender<Message>,
+    cmd_tx: async_channel::Sender<Command>,
+    cmd_rx: async_channel::Receiver<Command>,
+    address: Option<String>,
+) -> Result<(), String> {
+    let builder = match address {
+        Some(address) => zbus::connection::Builder::address(address.as_str()),
+        None => zbus::connection::Builder::session(),
+    }
+    .map_err(|error| format!("session bus unavailable: {error}"))?;
+    let conn = builder
+        .method_timeout(std::time::Duration::from_secs(1))
+        .build()
         .await
         .map_err(|error| format!("session bus unavailable: {error}"))?;
+    run_with_connection(generation, tx, cmd_tx, cmd_rx, conn).await
+}
+
+async fn run_with_connection(
+    generation: u64,
+    tx: calloop::channel::Sender<Message>,
+    cmd_tx: async_channel::Sender<Command>,
+    cmd_rx: async_channel::Receiver<Command>,
+    conn: Connection,
+) -> Result<(), String> {
     // DoNotQueue: when another host owns the name we report it and stop
     // instead of taking the role away from it.
     let reply = conn
@@ -74,14 +175,13 @@ async fn run(tx: calloop::channel::Sender<Event>) -> Result<(), String> {
             "another StatusNotifier host owns {WATCHER_NAME}; tray disabled"
         ));
     }
-    let (cmd_tx, cmd_rx) = async_channel::bounded::<Command>(MAX_ITEMS);
     let registered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     conn.object_server()
         .at(
             WATCHER_PATH,
             Watcher {
                 registered: registered.clone(),
-                commands: cmd_tx,
+                commands: cmd_tx.clone(),
             },
         )
         .await
@@ -111,6 +211,10 @@ async fn run(tx: calloop::channel::Sender<Event>) -> Result<(), String> {
         .await;
         let mut changed = false;
         match incoming {
+            Incoming::Command(None) => break,
+            Incoming::Command(Some(Command::Activate { service, path })) => {
+                activate_on_bus(&conn, &service, &path).await;
+            }
             Incoming::Command(Some(Command::Register { service, bus })) => {
                 if let Some(item) = read_item(&conn, &service, &bus).await {
                     let already_known = items.iter().any(|known| same_destination(known, &item));
@@ -123,7 +227,6 @@ async fn run(tx: calloop::channel::Sender<Event>) -> Result<(), String> {
                     }
                 }
             }
-            Incoming::Command(None) => break,
             Incoming::Change(Some(message)) => {
                 if let Some(signal) = NameOwnerChanged::from_message(message) {
                     if let Ok(args) = signal.args()
@@ -152,7 +255,13 @@ async fn run(tx: calloop::channel::Sender<Event>) -> Result<(), String> {
                     icon: item.icon.clone(),
                 })
                 .collect();
-            if tx.send(Event::Items(snapshot)).is_err() {
+            if tx
+                .send(Message {
+                    generation,
+                    event: Event::Items(snapshot),
+                })
+                .is_err()
+            {
                 break;
             }
         }
@@ -173,6 +282,7 @@ struct Item {
 
 enum Command {
     Register { service: String, bus: String },
+    Activate { service: String, path: String },
 }
 
 struct Watcher {
@@ -312,7 +422,7 @@ fn pixmap_icon(pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<Icon> {
     Some(Icon {
         width: *width as u32,
         height: *height as u32,
-        rgba,
+        rgba: rgba.into(),
     })
 }
 
@@ -436,33 +546,158 @@ fn decode_png_bytes(bytes: &[u8]) -> Option<Icon> {
     Some(Icon {
         width: info.width,
         height: info.height,
-        rgba,
+        rgba: rgba.into(),
     })
 }
 
-/// Left click on an item: `Activate(x, y)` with 0,0 because the bar itself
-/// places the icon. Runs on its own thread so the UI never waits on the bus.
-pub fn activate(item: &TrayItem) {
-    let service = item.service.clone();
-    let path = item.path.clone();
-    std::thread::spawn(move || {
-        let result = zbus::block_on(async move {
-            let conn = Connection::session().await?;
-            let proxy = Proxy::new(&conn, service.as_str(), path.as_str(), ITEM_INTERFACE).await?;
-            proxy
-                .call_method("Activate", &(0i32, 0i32))
-                .await
-                .map(|_| ())
-        });
-        if let Err(error) = result {
-            eprintln!("hayu: tray activate failed: {error}");
-        }
-    });
+/// Perform one activation on the service worker. Builder's method timeout bounds D-Bus calls.
+async fn activate_on_bus(conn: &Connection, service: &str, path: &str) {
+    let result = async {
+        let proxy = Proxy::new(conn, service, path, ITEM_INTERFACE).await?;
+        proxy
+            .call_method("Activate", &(0i32, 0i32))
+            .await
+            .map(|_| ())
+    }
+    .await;
+    if let Err(error) = result {
+        eprintln!("hayu: tray activate failed: {error}");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Child, Command as ProcessCommand, Stdio};
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static DBUS_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    struct TestSignal {
+        started: AtomicBool,
+        lock: StdMutex<()>,
+        wake: std::sync::Condvar,
+    }
+
+    impl TestSignal {
+        const fn new() -> Self {
+            Self {
+                started: AtomicBool::new(false),
+                lock: StdMutex::new(()),
+                wake: std::sync::Condvar::new(),
+            }
+        }
+        fn signal(&self) {
+            let _guard = self.lock.lock().unwrap();
+            self.started.store(true, Ordering::Release);
+            self.wake.notify_all();
+        }
+        fn wait_timeout(&self, timeout: std::time::Duration) -> Result<(), ()> {
+            let guard = self.lock.lock().unwrap();
+            let (guard, result) = self
+                .wake
+                .wait_timeout_while(guard, timeout, |_| !self.started.load(Ordering::Acquire))
+                .unwrap();
+            drop(guard);
+            if result.timed_out() && !self.started.load(Ordering::Acquire) {
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Each test owns its signals, so a parallel test can never observe or
+    /// clear another one's state.
+    struct SlowItem {
+        title_started: Arc<TestSignal>,
+        activate_started: Arc<TestSignal>,
+    }
+
+    #[interface(name = "org.kde.StatusNotifierItem")]
+    impl SlowItem {
+        #[zbus(property)]
+        async fn title(&self) -> String {
+            self.title_started.signal();
+            std::future::pending::<String>().await
+        }
+        async fn activate(&self, _x: i32, _y: i32) {
+            self.activate_started.signal();
+            std::future::pending().await
+        }
+    }
+
+    struct PrivateBus(Child);
+
+    impl PrivateBus {
+        fn start() -> (Self, String) {
+            let mut child = ProcessCommand::new("dbus-daemon")
+                .args(["--session", "--nofork", "--print-address=1"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start private dbus-daemon");
+            use std::io::BufRead;
+            let address = std::io::BufReader::new(child.stdout.take().expect("daemon stdout"))
+                .lines()
+                .next()
+                .expect("address line")
+                .expect("address");
+            (Self(child), address)
+        }
+    }
+
+    impl Drop for PrivateBus {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn name_has_owner(address: &str) -> bool {
+        let connection = zbus::block_on(
+            zbus::connection::Builder::address(address)
+                .expect("private bus address")
+                .build(),
+        )
+        .expect("connect to private bus");
+        zbus::block_on(connection.call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "NameHasOwner",
+            &WATCHER_NAME,
+        ))
+        .expect("NameHasOwner reply")
+        .body()
+        .deserialize::<bool>()
+        .expect("NameHasOwner bool")
+    }
+
+    fn wait_for_name(address: &str) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < end {
+            if name_has_owner(address) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// The daemon releases a name asynchronously after the connection closes,
+    /// so a single immediate check races the daemon's socket teardown.
+    fn wait_for_name_release(address: &str) -> bool {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < end {
+            if !name_has_owner(address) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
 
     #[test]
     fn service_forms_resolve_to_a_bus_and_path() {
@@ -497,8 +732,168 @@ mod tests {
         assert_eq!((icon.width, icon.height), (2, 1));
         assert_eq!(
             icon.rgba,
-            vec![0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x80]
+            Arc::<[u8]>::from([0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x80])
         );
+    }
+
+    #[test]
+    fn icon_clones_share_pixel_storage() {
+        let icon = pixmap_icon(&[(1, 1, vec![255, 1, 2, 3])]).expect("icon");
+        let clone = icon.clone();
+        assert!(Arc::ptr_eq(&icon.rgba, &clone.rgba));
+    }
+
+    #[test]
+    fn service_releases_name_and_restarts_on_private_bus() {
+        let _lock = DBUS_TEST_LOCK.lock().unwrap();
+        let (_daemon, address) = PrivateBus::start();
+        let (tx, _rx) = calloop::channel::channel::<Message>();
+        for generation in 0..2 {
+            let mut service =
+                Service::start_with_address(generation, tx.clone(), Some(address.clone()))
+                    .expect("start tray");
+            assert!(wait_for_name(&address));
+            service.stop();
+            assert!(wait_for_name_release(&address), "name not released");
+        }
+    }
+
+    #[test]
+    fn stop_cancels_worker_promptly() {
+        let _lock = DBUS_TEST_LOCK.lock().unwrap();
+        let (_daemon, address) = PrivateBus::start();
+        let (tx, _rx) = calloop::channel::channel::<Message>();
+        let mut service =
+            Service::start_with_address(5, tx, Some(address.clone())).expect("start tray");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let start = std::time::Instant::now();
+        service.stop();
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert!(wait_for_name_release(&address), "name not released");
+    }
+
+    #[test]
+    fn stop_cancels_slow_property_and_activate_calls() {
+        let _lock = DBUS_TEST_LOCK.lock().unwrap();
+        let (_daemon, address) = PrivateBus::start();
+        let owner = zbus::block_on(
+            zbus::connection::Builder::address(address.as_str())
+                .unwrap()
+                .build(),
+        )
+        .expect("private bus connection");
+        zbus::block_on(owner.request_name("org.example.SlowItem")).expect("claim fake item name");
+        let title_started = Arc::new(TestSignal::new());
+        let activate_started = Arc::new(TestSignal::new());
+        zbus::block_on(owner.object_server().at(
+            "/SlowItem",
+            SlowItem {
+                title_started: title_started.clone(),
+                activate_started: activate_started.clone(),
+            },
+        ))
+        .unwrap();
+        let (tx, _rx) = calloop::channel::channel::<Message>();
+        let mut service =
+            Service::start_with_address(8, tx, Some(address.clone())).expect("start tray");
+        let item = TrayItem {
+            id: 0,
+            title: String::new(),
+            service: "org.example.SlowItem".into(),
+            path: "/SlowItem".into(),
+            icon: None,
+        };
+        service
+            .worker
+            .as_ref()
+            .expect("worker")
+            .0
+            .try_send(Command::Register {
+                service: "org.example.SlowItem/SlowItem".into(),
+                bus: "org.example.SlowItem".into(),
+            })
+            .expect("queue fake registration");
+        assert!(
+            title_started
+                .wait_timeout(std::time::Duration::from_secs(2))
+                .is_ok()
+        );
+        let start = std::time::Instant::now();
+        service.stop();
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        assert!(wait_for_name_release(&address), "name not released");
+
+        // New service; activate request remains pending on fake method until cancellation.
+        let (tx, _rx) = calloop::channel::channel::<Message>();
+        let mut service =
+            Service::start_with_address(9, tx, Some(address.clone())).expect("restart tray");
+        service.activate(&item).expect("queue activation");
+        assert!(
+            activate_started
+                .wait_timeout(std::time::Duration::from_secs(2))
+                .is_ok()
+        );
+        let start = std::time::Instant::now();
+        service.stop();
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        assert!(wait_for_name_release(&address), "name not released");
+        drop(owner);
+    }
+
+    #[test]
+    fn activation_queue_reports_overflow() {
+        let (commands, receiver) = async_channel::bounded(1);
+        let (cancel, cancel_rx) = async_channel::bounded(1);
+        let worker = thread::spawn(move || {
+            let _ = cancel_rx.recv_blocking();
+            drop(receiver);
+        });
+        let service = Service {
+            worker: Some((commands, cancel, worker)),
+        };
+        let item = TrayItem {
+            id: 0,
+            title: String::new(),
+            service: "org.example.Item".into(),
+            path: DEFAULT_ITEM_PATH.into(),
+            icon: None,
+        };
+        assert_eq!(service.activate(&item), Ok(()));
+        assert_eq!(service.activate(&item), Err(ActivateError::Full));
+    }
+
+    #[test]
+    fn activation_reports_stopped_when_the_worker_is_gone() {
+        let item = TrayItem {
+            id: 0,
+            title: String::new(),
+            service: "org.example.Item".into(),
+            path: DEFAULT_ITEM_PATH.into(),
+            icon: None,
+        };
+        // Closed command channel: the worker still exists but cannot receive.
+        let (commands, receiver) = async_channel::bounded(1);
+        drop(receiver);
+        let (cancel, cancel_rx) = async_channel::bounded(1);
+        let worker = thread::spawn(move || {
+            let _ = cancel_rx.recv_blocking();
+        });
+        let service = Service {
+            worker: Some((commands, cancel, worker)),
+        };
+        assert_eq!(service.activate(&item), Err(ActivateError::Stopped));
+
+        // Finished worker: the sender would accept a command nobody reads.
+        let (commands, _receiver) = async_channel::bounded(1);
+        let (cancel, _cancel_rx) = async_channel::bounded(1);
+        let worker = thread::spawn(|| {});
+        while !worker.is_finished() {
+            thread::yield_now();
+        }
+        let service = Service {
+            worker: Some((commands, cancel, worker)),
+        };
+        assert_eq!(service.activate(&item), Err(ActivateError::Stopped));
     }
 
     #[test]

@@ -6,6 +6,10 @@ Status: initial design proposal 0.1, November 2, 2026. The final logo, palette, 
 
 Readable information, reachable controls, visible keyboard focus, and brief optional motion. Consistency covers the bar, launcher, dock, control center, and pickers. Visual completeness must not depend on compositor blur; solid backgrounds must remain fully usable.
 
+## Prototype lifecycle behavior (ADR-0008)
+
+Launcher open acknowledges the control request without waiting for Hyprland IPC. Before an initial discovery answer, mapping can remain pending so the focused output is selected from a current snapshot rather than guessed. A current failed discovery/snapshot permits fallback to available Wayland outputs; closing or disabling cancels a pending open. A mapped overlay does not follow later focus changes. Closing keeps its surface reusable; disabling or losing its output releases it. Slow workspace IPC must not block keyboard, pointer or redraw dispatch. No visual tokens or layout change accompanies this lifecycle work.
+
 ## Prototype tokens
 
 | Token      | Dark    | Light   |

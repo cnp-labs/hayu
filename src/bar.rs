@@ -77,6 +77,19 @@ pub(crate) struct Bar {
     pub(crate) tray_hits: Vec<render::TrayHit>,
 }
 
+impl Drop for Bar {
+    fn drop(&mut self) {
+        // Destroy the surface children first; `presenter` and `layer` still
+        // drop in field order, and the app destroys the native wl_surface
+        // after the layer role is gone.
+        if let Some(fractional) = self.fractional.take() {
+            fractional.destroy();
+        }
+        if let Some(viewport) = self.viewport.take() {
+            viewport.destroy();
+        }
+    }
+}
 impl Bar {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(

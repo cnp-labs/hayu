@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{NaiveTime, Timelike};
 use cosmic_text::{
@@ -68,7 +69,8 @@ pub struct TrayImage {
     pub id: usize,
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    /// Shared with the tray snapshot; the strip still copies it per frame.
+    pub rgba: Arc<[u8]>,
 }
 
 /// Tray icon whose drawn rect contains `logical_x`, if any.
@@ -378,13 +380,12 @@ pub fn rasterize(frame: &Frame, atlas: &Atlas) -> Option<Pixmap> {
                     let index = ((py * width + px) * 4) as usize;
                     let inverse = 255 - alpha;
                     for channel in 0..3 {
-                        data[index + channel] =
-                            ((image.rgba[texel + channel] as u32 * alpha
-                                + data[index + channel] as u32 * inverse)
-                                / 255) as u8;
+                        data[index + channel] = ((image.rgba[texel + channel] as u32 * alpha
+                            + data[index + channel] as u32 * inverse)
+                            / 255) as u8;
                     }
-                    data[index + 3] = (alpha + data[index + 3] as u32 * inverse / 255).min(255)
-                        as u8;
+                    data[index + 3] =
+                        (alpha + data[index + 3] as u32 * inverse / 255).min(255) as u8;
                 }
             }
         }
@@ -491,8 +492,8 @@ pub fn build(scene: &Scene<'_>, fonts: &mut FontSystem, atlas: &mut Atlas) -> Op
     let text_y = ((scene.height as f32) - font_size * 1.3) / 2.0;
     build_tray(&mut frame, scene, scale);
     // Centre first: the side areas only get the room it leaves.
-    let center_width = area_width(fonts, scene, scene.center, font_size, scale)
-        .min((width - 2.0 * edge).max(0.0));
+    let center_width =
+        area_width(fonts, scene, scene.center, font_size, scale).min((width - 2.0 * edge).max(0.0));
     let center_x = ((width - center_width) / 2.0).max(edge);
     let left_budget = (center_x - edge - gap).max(0.0);
     let right_edge = width - edge;
@@ -557,9 +558,7 @@ fn area_width(
         let width = match *id {
             "workspaces" => workspaces_width(scene, fonts, font_size, scale, f32::INFINITY),
             "clock" => text_width(fonts, scene.clock, font_size),
-            "active_window" if !scene.title.is_empty() => {
-                text_width(fonts, scene.title, font_size)
-            }
+            "active_window" if !scene.title.is_empty() => text_width(fonts, scene.title, font_size),
             "tray" => tray_width(scene, scale),
             _ => 0.0,
         };
@@ -594,11 +593,29 @@ fn draw_area(
         let offset = if used > 0.0 { gap } else { 0.0 };
         let remaining = (budget - used - offset).max(0.0);
         let width = match *id {
-            "workspaces" => draw_workspaces(frame, fonts, atlas, scene, x + offset, remaining, font_size, text_y, scale),
+            "workspaces" => draw_workspaces(
+                frame,
+                fonts,
+                atlas,
+                scene,
+                x + offset,
+                remaining,
+                font_size,
+                text_y,
+                scale,
+            ),
             "clock" => {
                 let width = text_width(fonts, scene.clock, font_size);
                 if width <= remaining {
-                    frame.text(fonts, atlas, scene.clock, x + offset, text_y, font_size, scene.theme.fg);
+                    frame.text(
+                        fonts,
+                        atlas,
+                        scene.clock,
+                        x + offset,
+                        text_y,
+                        font_size,
+                        scene.theme.fg,
+                    );
                     width
                 } else {
                     0.0
@@ -611,7 +628,15 @@ fn draw_area(
                     0.0
                 } else {
                     let width = text_width(fonts, &title, font_size);
-                    frame.text(fonts, atlas, &title, x + offset, text_y, font_size, scene.theme.muted);
+                    frame.text(
+                        fonts,
+                        atlas,
+                        &title,
+                        x + offset,
+                        text_y,
+                        font_size,
+                        scene.theme.muted,
+                    );
                     width
                 }
             }
@@ -801,7 +826,11 @@ fn draw_workspaces(
                 scene.theme.accent,
             );
         }
-        let color = if active { scene.theme.bg } else { scene.theme.fg };
+        let color = if active {
+            scene.theme.bg
+        } else {
+            scene.theme.fg
+        };
         frame.pills.push(Pill {
             id: ws.id,
             x: x + offset,
@@ -1004,7 +1033,10 @@ mod tests {
             accent.x
         );
         assert!(
-            frame.glyphs.iter().all(|glyph| glyph.x + glyph.w as f32 <= 800.0),
+            frame
+                .glyphs
+                .iter()
+                .all(|glyph| glyph.x + glyph.w as f32 <= 800.0),
             "no glyph crossed the right edge"
         );
     }
@@ -1019,13 +1051,13 @@ mod tests {
             id: 0,
             width: 2,
             height: 2,
-            rgba: [255, 0, 0, 255].repeat(4),
+            rgba: Arc::from([255u8, 0, 0, 255].repeat(4)),
         };
         let blue = TrayImage {
             id: 1,
             width: 2,
             height: 2,
-            rgba: [0, 0, 255, 255].repeat(4),
+            rgba: Arc::from([0u8, 0, 255, 255].repeat(4)),
         };
         let tray = [red, blue];
         let left: [&str; 0] = [];
@@ -1055,10 +1087,20 @@ mod tests {
             first.x + first.w <= 400.0,
             "icons stay inside the frame: {first:?}"
         );
-        assert_eq!(tray_at(&frame.tray_hits, first.x + first.w / 2.0, 1.0), Some(0));
+        assert_eq!(
+            tray_at(&frame.tray_hits, first.x + first.w / 2.0, 1.0),
+            Some(0)
+        );
         let second = frame.tray_hits[1];
-        assert_eq!(tray_at(&frame.tray_hits, second.x + second.w / 2.0, 1.0), Some(1));
-        assert_eq!(tray_at(&frame.tray_hits, 0.0, 1.0), None, "left edge is empty");
+        assert_eq!(
+            tray_at(&frame.tray_hits, second.x + second.w / 2.0, 1.0),
+            Some(1)
+        );
+        assert_eq!(
+            tray_at(&frame.tray_hits, 0.0, 1.0),
+            None,
+            "left edge is empty"
+        );
         let pixmap = rasterize(&frame, &atlas).expect("pixels");
         let pixels = pixmap.data();
         let index = ((16 * 400 + (second.x + second.w / 2.0) as i32) * 4) as usize;
@@ -1129,7 +1171,10 @@ mod tests {
                 rect.x >= 0.0 && rect.x + rect.w <= 320.0,
                 "rect escaped the frame: {rect:?}"
             );
-            assert!(rect.y >= 0.0 && rect.y + rect.h <= 32.0, "rect height: {rect:?}");
+            assert!(
+                rect.y >= 0.0 && rect.y + rect.h <= 32.0,
+                "rect height: {rect:?}"
+            );
         }
         for glyph in &frame.glyphs {
             assert!(

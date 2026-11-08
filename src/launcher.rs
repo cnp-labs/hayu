@@ -8,7 +8,10 @@ use smithay_client_toolkit::{
         wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerSurface},
     },
 };
-use wayland_client::{Proxy, QueueHandle, protocol::wl_output};
+use wayland_client::{
+    Proxy, QueueHandle,
+    protocol::{wl_output, wl_surface},
+};
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
     wp_fractional_scale_v1::WpFractionalScaleV1,
@@ -45,7 +48,24 @@ pub struct Surface {
     pub configured: bool,
 }
 
+impl Drop for Surface {
+    fn drop(&mut self) {
+        // Surface children go away here, before the app destroys the native
+        // wl_surface after the layer role has been dropped.
+        if let Some(fractional) = self.fractional.take() {
+            fractional.destroy();
+        }
+        if let Some(viewport) = self.viewport.take() {
+            viewport.destroy();
+        }
+    }
+}
 impl Surface {
+    /// Consume the surface and hand back only the native object, already
+    /// detached from its fractional-scale and viewport children.
+    fn into_native(self) -> wl_surface::WlSurface {
+        self.layer.wl_surface().clone()
+    }
     pub fn create(
         compositor: &CompositorState,
         shell: &LayerShell,
@@ -233,23 +253,39 @@ impl Launcher {
         self.open = false;
     }
 
-    pub fn on_layer_closed(&mut self, layer: &LayerSurface) -> bool {
-        if self
+    /// The compositor closed our layer. Returns the detached native surface
+    /// for the app to destroy after this dispatch, or `None` when the layer is
+    /// not ours (or was already forgotten).
+    pub fn on_layer_closed(&mut self, layer: &LayerSurface) -> Option<wl_surface::WlSurface> {
+        let owned = self
             .surface
             .as_ref()
-            .is_some_and(|surface| surface.owns(layer))
-        {
-            self.surface = None;
-            self.open = false;
-            true
-        } else {
-            false
+            .is_some_and(|surface| surface.owns(layer));
+        if !owned {
+            return None;
         }
+        let surface = self.surface.take()?;
+        self.open = false;
+        Some(surface.into_native())
     }
 
-    pub fn forget_surface(&mut self) {
-        self.surface = None;
+    /// Drop the surface without a compositor close event, e.g. when its output
+    /// disappears. The caller owns the returned native surface.
+    pub fn forget_surface(&mut self) -> Option<wl_surface::WlSurface> {
         self.open = false;
+        self.surface.take().map(Surface::into_native)
+    }
+
+    /// Release everything a disabled launcher owns: the layer surface, its
+    /// GL/atlas resources, and the scanned catalogue.
+    pub fn release(&mut self) -> Option<wl_surface::WlSurface> {
+        self.close();
+        let native = self.surface.take().map(Surface::into_native);
+        self.set_entries(Vec::new());
+        self.query.clear();
+        self.selected = 0;
+        self.error = None;
+        native
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> bool {
@@ -591,6 +627,36 @@ mod tests {
             exec: vec!["app".into()],
             terminal: false,
         }
+    }
+
+    #[test]
+    fn close_cancels_an_open_without_a_surface() {
+        // The deferred-mapping path keeps `open` true with no surface while it
+        // waits for a snapshot; close must cancel it like any other open.
+        let mut launcher = Launcher::new(Vec::new());
+        launcher.begin_open();
+        assert!(launcher.is_open());
+        assert!(launcher.surface.is_none());
+
+        launcher.close();
+
+        assert!(!launcher.is_open());
+        assert!(launcher.surface.is_none());
+    }
+
+    #[test]
+    fn release_drops_catalogue_and_query() {
+        let mut launcher = Launcher::new(vec![entry("foot.desktop", "Foot")]);
+        launcher.begin_open();
+        launcher.insert_text("fo");
+        assert_eq!(launcher.results().len(), 1);
+
+        assert!(launcher.release().is_none());
+
+        assert!(!launcher.is_open());
+        assert!(launcher.surface.is_none());
+        assert!(launcher.results().is_empty());
+        assert!(launcher.query().is_empty());
     }
 
     #[test]

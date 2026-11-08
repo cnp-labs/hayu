@@ -1,11 +1,11 @@
 use serde::Deserialize;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::thread;
-use std::time::Duration;
+pub mod worker;
+pub use worker::{Message, MessageKind, QueueFull, Service};
 
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
+
 const MAX_LINE_BUFFER: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -62,11 +62,14 @@ pub enum Event {
     CreateWorkspace { id: i64, name: String },
     DestroyWorkspace { name: String },
     Refresh,
-    Resync,
-    Disconnected,
 }
 
 impl Hyprland {
+    /// Adapter for a known runtime directory; tests inject a fake socket.
+    pub fn at(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+
     pub fn discover() -> Option<Self> {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
         let base = runtime.join("hypr");
@@ -130,7 +133,9 @@ impl Hyprland {
                     "repl hl.dispatch(hl.dsp.focus({{ workspace = {id} }}))"
                 ))
                 .map(|_| ())
-                .map_err(|lua| format!("legacy dispatch failed ({legacy}); Lua dispatch failed ({lua})")),
+                .map_err(|lua| {
+                    format!("legacy dispatch failed ({legacy}); Lua dispatch failed ({lua})")
+                }),
         }
     }
     /// Send a plain Hyprland command (`dispatch ...`) and return its raw reply.
@@ -143,95 +148,63 @@ impl Hyprland {
         }
     }
     fn exchange(&self, command: &str) -> Result<String, String> {
-        let mut stream = UnixStream::connect(self.request_socket())
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut stream = std::os::unix::net::UnixStream::connect(self.request_socket())
             .map_err(|e| format!("cannot connect to Hyprland request socket: {e}"))?;
-        stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-        stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+            .ok();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_millis(100)))
+            .ok();
         stream
             .write_all(command.as_bytes())
             .map_err(|e| format!("cannot write Hyprland request: {e}"))?;
         stream.shutdown(std::net::Shutdown::Write).ok();
-        let mut response = Vec::new();
-        let mut chunk = [0u8; 8192];
+        let mut data = Vec::new();
+        let mut buf = [0u8; 8192];
         loop {
-            let n = stream
-                .read(&mut chunk)
-                .map_err(|e| format!("Hyprland read failed: {e}"))?;
-            if n == 0 {
-                break;
+            if std::time::Instant::now() >= deadline {
+                return Err("Hyprland request timed out".into());
             }
-            if response.len() + n > MAX_RESPONSE {
-                return Err("Hyprland response exceeded 4 MiB".into());
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if data.len() + n > MAX_RESPONSE {
+                        return Err("Hyprland response exceeded 4 MiB".into());
+                    }
+                    data.extend_from_slice(&buf[..n])
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::Interrupted
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(e) => return Err(format!("Hyprland read failed: {e}")),
             }
-            response.extend_from_slice(&chunk[..n]);
         }
-        String::from_utf8(response).map_err(|e| format!("invalid Hyprland reply for {command}: {e}"))
+        String::from_utf8(data).map_err(|e| format!("invalid Hyprland reply for {command}: {e}"))
+    }
+    fn worker_request<T: for<'de> Deserialize<'de>>(
+        &self,
+        shared: &worker::Shared,
+        epoch: u64,
+        command: &str,
+    ) -> Result<T, worker::Failure> {
+        worker::request(self, shared, epoch, command)
+    }
+    fn worker_exchange(
+        &self,
+        shared: &worker::Shared,
+        epoch: u64,
+        command: &str,
+    ) -> Result<String, worker::Failure> {
+        worker::exchange(self, shared, epoch, command)
     }
     fn request<T: for<'de> Deserialize<'de>>(&self, command: &str) -> Result<T, String> {
         let reply = self.exchange(command)?;
         serde_json::from_str(&reply)
             .map_err(|e| format!("invalid Hyprland response for {command}: {e}"))
     }
-
-    fn connect_events(&self) -> Result<UnixStream, String> {
-        UnixStream::connect(self.event_socket())
-            .map_err(|e| format!("cannot connect to Hyprland event socket: {e}"))
-    }
 }
-
-pub fn spawn_event_thread(tx: calloop::channel::Sender<Event>) {
-    thread::spawn(move || {
-        let mut backoff = Duration::from_millis(250);
-        loop {
-            let Some(hypr) = Hyprland::discover() else {
-                if tx.send(Event::Disconnected).is_err() {
-                    return;
-                }
-                thread::sleep(backoff);
-                backoff = (backoff * 2).min(Duration::from_secs(5));
-                continue;
-            };
-            let mut stream = match hypr.connect_events() {
-                Ok(stream) => stream,
-                Err(_) => {
-                    if tx.send(Event::Disconnected).is_err() {
-                        return;
-                    }
-                    thread::sleep(backoff);
-                    backoff = (backoff * 2).min(Duration::from_secs(5));
-                    continue;
-                }
-            };
-            backoff = Duration::from_millis(250);
-            if tx.send(Event::Resync).is_err() {
-                return;
-            }
-            let mut lines = LineBuffer::default();
-            let mut chunk = [0u8; 8192];
-            let mut received = false;
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if !received {
-                            received = true;
-                            backoff = Duration::from_millis(250);
-                        }
-                        for event in lines.feed(&chunk[..n]) {
-                            if tx.send(event).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-            let _ = tx.send(Event::Disconnected);
-            thread::sleep(backoff);
-            backoff = (backoff * 2).min(Duration::from_secs(5));
-        }
-    });
-}
-
 #[derive(Default)]
 pub struct LineBuffer {
     buf: Vec<u8>,

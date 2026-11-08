@@ -338,7 +338,6 @@ pub fn restart_required(old: &Config, new: &Config) -> Vec<&'static str> {
             old.launcher.favorites != new.launcher.favorites,
             "launcher.favorites",
         ),
-        (old.tray != new.tray, "tray"),
         (old.notifications != new.notifications, "notifications"),
         (old.control_center != new.control_center, "control_center"),
         (old.media != new.media, "media"),
@@ -540,9 +539,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             restart_required(&base, &restart),
-            ["launcher.favorites", "tray"],
-            "bar.enabled and bar.outputs are applied by sync_bars"
+            ["launcher.favorites"],
+            "bar.enabled, bar.outputs and tray.enabled apply live"
         );
+        let mut tray_only = base.clone();
+        tray_only.tray.enabled = !base.tray.enabled;
+        assert!(restart_required(&base, &tray_only).is_empty());
         assert_eq!(
             restart_required(&base, &base),
             Vec::<&'static str>::new(),
@@ -553,7 +555,10 @@ mod tests {
     fn unknown_bar_widget_is_a_config_error() {
         let err = parse("schema_version = 1\n[bar]\nright = [\"netwrk\"]\n").unwrap_err();
         let text = err.to_string();
-        assert!(text.contains("bar.right") && text.contains("netwrk"), "{text}");
+        assert!(
+            text.contains("bar.right") && text.contains("netwrk"),
+            "{text}"
+        );
     }
     #[test]
     fn future_schema_rejected() {

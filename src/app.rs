@@ -48,11 +48,12 @@ use crate::a11y::A11y;
 use crate::bar::{Bar, NoEvents, ScaleTarget};
 use crate::config::{self, Config};
 use crate::desktop;
-use crate::hyprland::{self, Event, Hyprland, Snapshot, Workspace};
+use crate::hyprland::worker::{Message, MessageKind, Service as HyprService};
+use crate::hyprland::{Snapshot, Workspace};
 use crate::ipc::{self, Command as IpcCommand};
 use crate::launcher::{self, Launcher};
 use crate::render::{self, Theme};
-use crate::tray;
+use crate::tray::{self, Message as TrayMessage, Service as TrayService};
 
 pub fn run(cfg: Config) -> Result<(), String> {
     let conn =
@@ -78,16 +79,18 @@ pub fn run(cfg: Config) -> Result<(), String> {
         eprintln!("hayu: fractional-scale/viewporter not offered; using integer buffer scale");
     }
 
-    let (tray_tx, tray_rx) = calloop::channel::channel::<tray::Event>();
-    if cfg.tray.enabled {
-        tray::spawn(tray_tx);
-    }
+    let (tray_tx, tray_rx) = calloop::channel::channel::<TrayMessage>();
+    let tray_sender = tray_tx.clone();
+    let (hypr_tx, hypr_rx) = calloop::channel::sync_channel::<Message>(64);
+    let hypr_sender = hypr_tx.clone();
+    let hypr_generation = 1;
     let theme = Theme::from_config(&cfg.appearance.mode, &cfg.appearance.accent);
     let mut fonts = FontSystem::new();
     if fonts.db_mut().is_empty() {
         eprintln!("hayu: no system fonts found; text will not be drawn");
     }
     let clock = render::format_clock(&cfg.clock.format, Local::now().time());
+    let launcher_enabled = cfg.launcher.enabled;
 
     let mut event_loop: EventLoop<'static, State> =
         EventLoop::try_new().map_err(|e| format!("cannot create event loop: {e}"))?;
@@ -111,24 +114,29 @@ pub fn run(cfg: Config) -> Result<(), String> {
         theme,
         fonts,
         display_ptr: conn.display().id().as_ptr() as *mut c_void,
-        hypr: Hyprland::discover(),
+        hypr_service: None,
+        hypr_generation,
+        hypr_sender,
         snapshot: None,
+        snapshot_stamp: None,
+        snapshot_attempt_stamp: None,
         active_workspace: 0,
         title: String::new(),
         clock,
         bars: HashMap::new(),
         bars_dirty: false,
+        deferred_surfaces: Vec::new(),
         clock_timer: None,
+        tray_service: None,
+        tray_sender: tray_tx,
+        tray_generation: 0,
         tray_items: Vec::new(),
         tray_version: 0,
         launcher: Launcher::new(Vec::new()),
-        a11y: A11y::new(),
+        a11y: launcher_enabled.then(A11y::new),
         ipc_path: None,
         loop_signal: Some(event_loop.get_signal()),
     };
-    if state.hypr.is_none() {
-        eprintln!("hayu: Hyprland IPC not found; bar will show the clock only");
-    }
     state.resync();
     // Publish the hidden window before any launcher open, so a screen reader
     // that connects early sees a stable tree instead of an empty application.
@@ -138,7 +146,6 @@ pub fn run(cfg: Config) -> Result<(), String> {
     event_queue
         .roundtrip(&mut state)
         .map_err(|e| format!("Wayland roundtrip failed: {e}"))?;
-
     // Bind only once startup work is done, so a CLI client never waits on a half-ready shell.
     let server = ipc::Server::bind()?;
     let (listener, ipc_path) = server.into_parts();
@@ -148,7 +155,9 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .insert(loop_handle.clone())
         .map_err(|e| format!("cannot insert Wayland source: {e}"))?;
 
-    state.clock_timer = schedule_clock(&mut state)?;
+    if state.clock_timer.is_none() {
+        state.clock_timer = schedule_clock(&mut state)?;
+    }
 
     let signals = calloop::signals::Signals::new(&[
         calloop::signals::Signal::SIGINT,
@@ -163,20 +172,19 @@ pub fn run(cfg: Config) -> Result<(), String> {
         })
         .map_err(|e| format!("cannot insert signal source: {e}"))?;
 
-    let (tx, rx) = calloop::channel::channel::<Event>();
     loop_handle
-        .insert_source(rx, |event, _, state| {
-            if let ChannelEvent::Msg(event) = event {
-                state.handle_hypr_event(event);
+        .insert_source(hypr_rx, |event, _, state| {
+            if let ChannelEvent::Msg(message) = event {
+                state.handle_hypr_message(message);
             }
         })
         .map_err(|e| format!("cannot insert Hyprland channel: {e}"))?;
-    hyprland::spawn_event_thread(tx);
 
+    state.sync_tray(tray_sender);
     loop_handle
         .insert_source(tray_rx, |event, _, state| {
-            if let ChannelEvent::Msg(event) = event {
-                state.handle_tray_event(event);
+            if let ChannelEvent::Msg(message) = event {
+                state.handle_tray_message(message);
             }
         })
         .map_err(|e| format!("cannot insert tray channel: {e}"))?;
@@ -224,6 +232,69 @@ enum ClockStep {
     Minute,
 }
 
+fn generation_matches(message: u64, current: u64) -> bool {
+    message == current
+}
+
+/// The mapping decision a snapshot error produces, or `None` when the error is
+/// stale (other service generation or dropped connection) and must not touch
+/// the overlay. A current error answered the attempt, so the pending launcher
+/// falls back to the Wayland outputs instead of waiting for a snapshot.
+fn snapshot_error_map(
+    message_generation: u64,
+    message_epoch: u64,
+    current_generation: u64,
+    current_epoch: u64,
+    snapshot_current: bool,
+) -> Option<LauncherMap> {
+    (message_generation == current_generation && message_epoch == current_epoch).then(|| {
+        launcher_map_decision(
+            true,
+            snapshot_current,
+            needs_fresh_snapshot(
+                true,
+                Some((current_generation, current_epoch)),
+                current_generation,
+                current_epoch,
+            ),
+        )
+    })
+}
+fn snapshot_stamp_matches(
+    message_epoch: u64,
+    message_revision: u64,
+    current_epoch: u64,
+    current_revision: u64,
+    connected: bool,
+) -> bool {
+    connected && message_epoch == current_epoch && message_revision == current_revision
+}
+
+fn hypr_wanted(cfg: &Config, has_bars: bool, launcher_open: bool) -> bool {
+    launcher_open
+        || (has_bars
+            && cfg.bar.enabled
+            && [&cfg.bar.left, &cfg.bar.center, &cfg.bar.right]
+                .iter()
+                .any(|modules| {
+                    modules
+                        .iter()
+                        .any(|module| module == "workspaces" || module == "active_window")
+                }))
+}
+
+fn bar_uses_tray(cfg: &Config, output: Option<&str>) -> bool {
+    cfg.bar.enabled
+        && cfg
+            .bar
+            .outputs
+            .iter()
+            .any(|pattern| pattern == "*" || Some(pattern.as_str()) == output)
+        && [&cfg.bar.left, &cfg.bar.center, &cfg.bar.right]
+            .iter()
+            .any(|modules| modules.iter().any(|module| module == "tray"))
+}
+
 /// A `%S` needs a per-second timer; `%%S` is a literal percent and does not.
 fn clock_step(format: &str) -> ClockStep {
     let bytes = format.as_bytes();
@@ -244,8 +315,9 @@ fn clock_step(format: &str) -> ClockStep {
 
 /// No timer when no bar draws a clock. The config is re-read on reload, so
 /// this also decides whether a timer exists after a reload.
-fn clock_wanted(cfg: &Config) -> bool {
-    cfg.bar.enabled
+fn clock_wanted(cfg: &Config, has_bars: bool) -> bool {
+    has_bars
+        && cfg.bar.enabled
         && [&cfg.bar.left, &cfg.bar.center, &cfg.bar.right]
             .iter()
             .any(|modules| modules.iter().any(|module| module == "clock"))
@@ -271,7 +343,7 @@ fn duration_to_next_clock(format: &str) -> Duration {
 
 /// Insert the clock timer, or nothing when the bar shows no clock.
 fn schedule_clock(state: &mut State) -> Result<Option<RegistrationToken>, String> {
-    if !clock_wanted(&state.cfg) {
+    if !clock_wanted(&state.cfg, !state.bars.is_empty()) {
         return Ok(None);
     }
     let timer = Timer::from_duration(duration_to_next_clock(&state.cfg.clock.format));
@@ -307,6 +379,49 @@ impl Ime {
         self.serial = self.serial.wrapping_add(1);
     }
 }
+/// How `map_launcher` resolves its output.
+#[derive(Debug, PartialEq, Eq)]
+enum LauncherMap {
+    /// Use `launcher_output` now.
+    Now,
+    /// Hyprland owes this connection a snapshot; map from it instead of
+    /// guessing a monitor.
+    Wait,
+}
+
+/// True while a snapshot is still owed. Connected: the attempt for the current
+/// epoch (success or failure) must have resolved, so a reconnect waits for the
+/// new epoch. Disconnected: only a generation that never answered waits; once
+/// it answered, the overlay falls back instead of waiting for a reconnect.
+fn needs_fresh_snapshot(
+    connected: bool,
+    attempt: Option<(u64, u64)>,
+    generation: u64,
+    epoch: u64,
+) -> bool {
+    if connected {
+        attempt != Some((generation, epoch))
+    } else {
+        attempt.is_none_or(|(answered, _)| answered != generation)
+    }
+}
+
+/// `needs_fresh_snapshot` is true while the connection is up or while no
+/// snapshot from the current service generation exists yet. A service that
+/// already delivered a snapshot and then lost the compositor falls back to
+/// the Wayland outputs instead of waiting forever.
+fn launcher_map_decision(
+    service_running: bool,
+    snapshot_current: bool,
+    needs_fresh_snapshot: bool,
+) -> LauncherMap {
+    if service_running && !snapshot_current && needs_fresh_snapshot {
+        LauncherMap::Wait
+    } else {
+        LauncherMap::Now
+    }
+}
+
 pub struct State {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -325,24 +440,79 @@ pub struct State {
     theme: Theme,
     fonts: FontSystem,
     display_ptr: *mut c_void,
-    hypr: Option<Hyprland>,
+    hypr_service: Option<HyprService>,
+    hypr_generation: u64,
+    hypr_sender: calloop::channel::SyncSender<Message>,
     snapshot: Option<Snapshot>,
+    /// Service generation and connection epoch of `snapshot`; a snapshot from
+    /// another connection cannot name the focused monitor for this open.
+    snapshot_stamp: Option<(u64, u64)>,
+    /// Service generation and connection epoch of the last resolved discovery
+    /// attempt, successful or not. An attempt answered for the current epoch
+    /// ends a pending launcher wait; the epoch keeps a previous connection's
+    /// answer from covering a reconnect.
+    snapshot_attempt_stamp: Option<(u64, u64)>,
     active_workspace: i64,
     title: String,
     clock: String,
     bars: HashMap<u32, Bar>,
     /// Set by any state change that affects the bar; one flush per loop cycle.
     bars_dirty: bool,
+    /// Removed layer surfaces whose native object must not be destroyed while
+    /// the dispatch that dropped the role still holds it. Drained once the
+    /// dispatch returns, before the next draw.
+    deferred_surfaces: Vec<wl_surface::WlSurface>,
     clock_timer: Option<RegistrationToken>,
+    tray_service: Option<TrayService>,
+    tray_sender: calloop::channel::Sender<TrayMessage>,
+    tray_generation: u64,
     tray_items: Vec<tray::TrayItem>,
     tray_version: u32,
     launcher: Launcher,
-    a11y: A11y,
+    a11y: Option<A11y>,
     ipc_path: Option<PathBuf>,
     loop_signal: Option<LoopSignal>,
 }
 
 impl State {
+    fn handle_tray_message(&mut self, message: TrayMessage) {
+        if self.tray_service.is_none() || message.generation != self.tray_generation {
+            return;
+        }
+        self.handle_tray_event(message.event);
+    }
+
+    fn sync_tray(&mut self, tx: calloop::channel::Sender<TrayMessage>) {
+        let has_consumer = self.bars.values().any(|bar| {
+            let name = self
+                .output_state
+                .info(&bar.output)
+                .and_then(|info| info.name);
+            bar_uses_tray(&self.cfg, name.as_deref())
+        });
+        if !self.cfg.tray.enabled || !has_consumer {
+            let had_service = self.tray_service.take().is_some();
+            if had_service {
+                self.tray_generation = self.tray_generation.wrapping_add(1);
+            }
+            // Idempotent: output updates call this often and must not churn
+            // the icon strip version when nothing changed.
+            if had_service || !self.tray_items.is_empty() {
+                self.tray_items.clear();
+                self.tray_version = self.tray_version.wrapping_add(1);
+                self.invalidate_bars();
+            }
+            return;
+        }
+        if self.tray_service.is_none() {
+            self.tray_generation = self.tray_generation.wrapping_add(1);
+            match TrayService::start(self.tray_generation, tx) {
+                Ok(service) => self.tray_service = Some(service),
+                Err(error) => eprintln!("hayu: cannot start tray service: {error}"),
+            }
+        }
+    }
+
     fn handle_tray_event(&mut self, event: tray::Event) {
         match event {
             tray::Event::Items(items) => {
@@ -352,6 +522,12 @@ impl State {
             }
             tray::Event::Disabled(reason) => {
                 eprintln!("hayu: {reason}");
+                // The worker has exited; drop the inert service so a later
+                // sync (reload or output change) can retry once instead of
+                // holding a dead worker forever.
+                if self.tray_service.take().is_some() {
+                    self.tray_generation = self.tray_generation.wrapping_add(1);
+                }
                 self.tray_items.clear();
                 self.tray_version = self.tray_version.wrapping_add(1);
                 self.invalidate_bars();
@@ -370,8 +546,16 @@ impl State {
         self.bars_dirty = true;
     }
 
-    /// Called once per event-loop cycle: many capturers collapse into one draw.
+    /// Called once per event-loop cycle, after the dispatch returned: destroys
+    /// the surfaces queued by `remove_bar` and friends, then collapses many
+    /// invalidations into one draw.
     fn flush_invalidated(&mut self) {
+        // SCTK still holds the layer role across the callback that removed it;
+        // destroying the native surface earlier makes Hyprland kill the role
+        // and SCTK then sends role.destroy to an invalid object (error 42).
+        for surface in self.deferred_surfaces.drain(..) {
+            surface.destroy();
+        }
         if take_dirty(&mut self.bars_dirty) {
             self.render_bars();
         }
@@ -389,76 +573,149 @@ impl State {
         }
     }
 
-    fn resync(&mut self) {
-        if self.hypr.is_none() {
-            self.hypr = Hyprland::discover();
-        }
-        let Some(hypr) = &self.hypr else { return };
-        match hypr.snapshot() {
-            Ok(snapshot) => {
-                self.active_workspace = snapshot.active_workspace.id;
-                self.title = snapshot.active_window.title.clone();
-                self.snapshot = Some(snapshot);
-                self.invalidate_bars();
+    fn request_hypr_refresh(&mut self) {
+        if self.hypr_service.is_none() {
+            if !hypr_wanted(&self.cfg, !self.bars.is_empty(), self.launcher.is_open()) {
+                return;
             }
-            Err(err) => eprintln!("hayu: Hyprland snapshot failed: {err}"),
+            self.hypr_generation = self.hypr_generation.wrapping_add(1);
+            match HyprService::start(self.hypr_generation, self.hypr_sender.clone()) {
+                Ok(service) => self.hypr_service = Some(service),
+                Err(error) => {
+                    eprintln!("hayu: cannot start Hyprland service: {error}");
+                    return;
+                }
+            }
+        }
+        if self
+            .hypr_service
+            .as_ref()
+            .is_some_and(|service| service.refresh().is_err())
+        {
+            eprintln!("hayu: Hyprland action queue full; refresh rejected");
         }
     }
 
-    fn handle_hypr_event(&mut self, event: Event) {
-        match event {
-            Event::Workspace { id, name } => {
-                self.active_workspace = id;
-                if let (Some(name), Some(snapshot)) = (name, self.snapshot.as_mut()) {
-                    if let Some(ws) = snapshot.workspaces.iter_mut().find(|w| w.name == name) {
-                        ws.id = id;
-                    } else {
-                        snapshot.workspaces.push(Workspace {
-                            id,
-                            name,
-                            ..Workspace::default()
-                        });
+    fn handle_hypr_message(&mut self, message: Message) {
+        if let Some(service) = &self.hypr_service {
+            service.output_drained();
+        }
+        if self.hypr_service.is_none()
+            || !generation_matches(message.generation, self.hypr_generation)
+        {
+            return;
+        }
+        match message.kind {
+            MessageKind::Snapshot(result) => {
+                let (epoch, revision, connected) = self
+                    .hypr_service
+                    .as_ref()
+                    .map_or((0, 0, false), HyprService::connection_stamp);
+                match result {
+                    Ok(snapshot) => {
+                        if !snapshot_stamp_matches(
+                            message.epoch,
+                            message.revision,
+                            epoch,
+                            revision,
+                            connected,
+                        ) {
+                            return;
+                        }
+                        self.apply_snapshot(snapshot, message.epoch);
+                        // A launcher opened before the first snapshot of this
+                        // connection maps only now.
+                        if let Err(error) = self.map_launcher() {
+                            eprintln!("hayu: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("hayu: Hyprland snapshot failed: {error}");
+                        // A failed discovery answers the attempt, so a pending
+                        // launcher falls back instead of waiting forever. Only
+                        // the current generation and connection may answer; a
+                        // stale error must not move the overlay.
+                        if snapshot_error_map(
+                            message.generation,
+                            message.epoch,
+                            self.hypr_generation,
+                            epoch,
+                            self.snapshot_current(),
+                        )
+                        .is_some()
+                        {
+                            self.snapshot_attempt_stamp = Some((self.hypr_generation, epoch));
+                            if let Err(error) = self.map_launcher() {
+                                eprintln!("hayu: {error}");
+                            }
+                        }
                     }
                 }
-                self.invalidate_bars();
             }
-            Event::CreateWorkspace { id, name } => {
-                if let Some(snapshot) = self.snapshot.as_mut()
-                    && !snapshot.workspaces.iter().any(|w| w.name == name)
-                {
-                    snapshot.workspaces.push(Workspace {
-                        id,
-                        name,
-                        ..Workspace::default()
-                    });
-                }
-                self.invalidate_bars();
+            MessageKind::Error(error) => {
+                eprintln!("hayu: Hyprland request failed: {error}");
             }
-            Event::DestroyWorkspace { name } => {
-                if let Some(snapshot) = self.snapshot.as_mut() {
-                    snapshot.workspaces.retain(|w| w.name != name);
-                }
-                self.invalidate_bars();
+        }
+    }
+
+    fn apply_snapshot(&mut self, snapshot: Snapshot, epoch: u64) {
+        self.active_workspace = snapshot.active_workspace.id;
+        self.title = snapshot.active_window.title.clone();
+        self.snapshot = Some(snapshot);
+        self.snapshot_stamp = Some((self.hypr_generation, epoch));
+        self.snapshot_attempt_stamp = Some((self.hypr_generation, epoch));
+        self.invalidate_bars();
+    }
+
+    /// True only when `snapshot` came from the live connection. A reopen after
+    /// the service stopped must not trust the saved monitor layout.
+    fn snapshot_current(&self) -> bool {
+        let Some(service) = &self.hypr_service else {
+            return false;
+        };
+        let (epoch, _, connected) = service.connection_stamp();
+        connected && self.snapshot_stamp == Some((self.hypr_generation, epoch))
+    }
+
+    fn hypr_connected(&self) -> bool {
+        self.hypr_service
+            .as_ref()
+            .is_some_and(|service| service.connection_stamp().2)
+    }
+
+    fn needs_fresh_snapshot(&self) -> bool {
+        let epoch = self
+            .hypr_service
+            .as_ref()
+            .map_or(0, |service| service.connection_stamp().0);
+        needs_fresh_snapshot(
+            self.hypr_connected(),
+            self.snapshot_attempt_stamp,
+            self.hypr_generation,
+            epoch,
+        )
+    }
+
+    fn resync(&mut self) {
+        self.request_hypr_refresh();
+    }
+
+    fn sync_hypr(&mut self) {
+        let wanted = hypr_wanted(&self.cfg, !self.bars.is_empty(), self.launcher.is_open());
+        if !wanted {
+            if self.hypr_service.is_some() {
+                self.hypr_generation = self.hypr_generation.wrapping_add(1);
+                self.hypr_service = None;
             }
-            Event::ActiveWindow { title } => {
-                self.title = title;
-                if let Some(snapshot) = self.snapshot.as_mut() {
-                    snapshot.active_window.title = self.title.clone();
-                }
-                self.invalidate_bars();
-            }
-            Event::FocusMonitor { monitor } => {
-                if let Some(snapshot) = self.snapshot.as_mut() {
-                    for m in &mut snapshot.monitors {
-                        m.focused = m.name == monitor;
-                    }
-                }
-                self.invalidate_bars();
-            }
-            Event::Refresh | Event::Resync => self.resync(),
-            Event::Disconnected => {
-                eprintln!("hayu: Hyprland event socket disconnected; reconnecting");
-            }
+            self.snapshot = None;
+            self.snapshot_stamp = None;
+            self.snapshot_attempt_stamp = None;
+            self.active_workspace = 0;
+            self.title.clear();
+            return;
+        }
+        if self.hypr_service.is_none() {
+            self.request_hypr_refresh();
         }
     }
 
@@ -522,17 +779,22 @@ impl State {
         self.theme = theme;
         self.clock = render::format_clock(&self.cfg.clock.format, Local::now().time());
         self.reschedule_clock();
-        if !self.cfg.launcher.enabled && self.launcher.is_open() {
-            self.close_launcher();
+        if !self.cfg.launcher.enabled {
+            self.release_launcher();
+        } else if self.a11y.is_none() {
+            self.a11y = Some(A11y::new());
+            self.sync_a11y();
         }
         self.sync_bars();
+        self.sync_hypr();
+        self.sync_tray(self.tray_sender.clone());
         self.apply_bar_geometry();
         self.invalidate_bars();
         Ok((!restart.is_empty()).then(|| format!("restart required for: {}", restart.join(", "))))
     }
 
     /// Height and edge are layer-shell state, so a change needs a new configure
-    /// before the next buffer. Outputs and widget lists still need a restart.
+    /// before the next buffer.
     fn apply_bar_geometry(&mut self) {
         let height = self.cfg.bar.height.clamp(1, 4096) as u32;
         let bottom = self.cfg.bar.position == "bottom";
@@ -568,44 +830,83 @@ impl State {
         if self.launcher.is_open() {
             return Ok(());
         }
-        let output = self
-            .launcher_output()
-            .ok_or_else(|| "no output is available for the launcher".to_string())?;
+        // Refresh on every open so an application installed since startup can
+        // be launched without restarting the shell.
+        self.launcher.set_entries(desktop::scan());
+        self.launcher.begin_open();
+        self.sync_hypr();
+        self.request_hypr_refresh();
+        // The overlay answers the request immediately; with a live Hyprland
+        // service but no snapshot for this connection it stays pending and
+        // maps from `apply_snapshot` instead of guessing a monitor.
+        self.map_launcher()
+    }
+
+    /// Create the overlay on its target output. Called on open and again on
+    /// the first snapshot of the current connection when the open was earlier.
+    fn map_launcher(&mut self) -> Result<(), String> {
+        if !self.launcher.is_open() || self.launcher.surface.is_some() {
+            return Ok(());
+        }
+        if launcher_map_decision(
+            self.hypr_service.is_some(),
+            self.snapshot_current(),
+            self.needs_fresh_snapshot(),
+        ) == LauncherMap::Wait
+        {
+            return Ok(());
+        }
+        let output = match self.launcher_output() {
+            Some(output) => output,
+            None => {
+                self.close_launcher();
+                return Err("no output is available for the launcher".into());
+            }
+        };
         let scale = self
             .output_state
             .info(&output)
             .map(|info| info.scale_factor)
             .unwrap_or(1) as f32;
-        // Refresh on every open so an application installed since startup can
-        // be launched without restarting the shell.
-        self.launcher.set_entries(desktop::scan());
-        self.launcher.begin_open();
-        if self.launcher.surface.is_none() {
-            match launcher::Surface::create(
-                &self.compositor,
-                &self.layer_shell,
-                &self.qh,
-                &output,
-                scale,
-                self.fractional.as_ref(),
-                self.viewporter.as_ref(),
-            ) {
-                Ok(surface) => self.launcher.show(surface),
-                Err(error) => {
-                    self.close_launcher();
-                    return Err(error);
-                }
+        let created = launcher::Surface::create(
+            &self.compositor,
+            &self.layer_shell,
+            &self.qh,
+            &output,
+            scale,
+            self.fractional.as_ref(),
+            self.viewporter.as_ref(),
+        );
+        match created {
+            Ok(surface) => {
+                self.launcher.show(surface);
+                // The draw happens on the configure event for this open;
+                // painting here would attach a buffer before a reconfigure.
+                Ok(())
+            }
+            Err(error) => {
+                self.close_launcher();
+                Err(error)
             }
         }
-        // The draw happens on the configure event for this open; painting here
-        // would attach a buffer before the compositor reconfigured the surface.
-        Ok(())
     }
 
     fn close_launcher(&mut self) {
         self.ime_disable();
         self.launcher.close();
         self.sync_a11y();
+        self.sync_hypr();
+    }
+
+    /// A disabled launcher must not keep a surface, GPU/atlas resources, a
+    /// scanned catalogue or an accessibility adapter alive.
+    fn release_launcher(&mut self) {
+        self.ime_disable();
+        if let Some(surface) = self.launcher.release() {
+            self.deferred_surfaces.push(surface);
+        }
+        self.a11y = None;
+        self.sync_hypr();
     }
     fn ime_attach_seat(&mut self, qh: &QueueHandle<Self>, seat: &wl_seat::WlSeat) {
         if self.ime.is_some() {
@@ -795,23 +1096,36 @@ impl State {
             .filter(|key| !keep.contains(key))
             .collect();
         for key in stale {
-            if let Some(bar) = self.bars.remove(&key) {
-                // The layer role must be destroyed before its surface.
-                let surface = bar.layer.wl_surface().clone();
-                drop(bar);
-                surface.destroy();
-            }
+            self.remove_bar(key);
+        }
+        self.reschedule_clock();
+        self.sync_tray(self.tray_sender.clone());
+    }
+
+    /// Drop a bar and queue its native surface; the destroy happens once the
+    /// layer role is gone, in `flush_invalidated`.
+    fn remove_bar(&mut self, key: u32) {
+        if let Some(bar) = self.bars.remove(&key) {
+            let surface = bar.layer.wl_surface().clone();
+            drop(bar);
+            self.deferred_surfaces.push(surface);
         }
     }
 
     fn launcher_output(&self) -> Option<wl_output::WlOutput> {
-        let focused = self.snapshot.as_ref().and_then(|snapshot| {
-            snapshot
-                .monitors
-                .iter()
-                .find(|monitor| monitor.focused)
-                .map(|monitor| monitor.name.clone())
-        });
+        // A snapshot from a stopped connection names a monitor that may no
+        // longer be focused; fall back to the outputs instead of trusting it.
+        let focused = self
+            .snapshot
+            .as_ref()
+            .filter(|_| self.snapshot_current())
+            .and_then(|snapshot| {
+                snapshot
+                    .monitors
+                    .iter()
+                    .find(|monitor| monitor.focused)
+                    .map(|monitor| monitor.name.clone())
+            });
         if let Some(name) = focused {
             for bar in self.bars.values() {
                 if self
@@ -823,6 +1137,17 @@ impl State {
                 {
                     return Some(bar.output.clone());
                 }
+            }
+            // The focused monitor may run no bar (bar.outputs filter or
+            // bar.enabled = false); the launcher still belongs there.
+            if let Some(output) = self.output_state.outputs().find(|output| {
+                self.output_state
+                    .info(output)
+                    .and_then(|info| info.name)
+                    .as_deref()
+                    == Some(name.as_str())
+            }) {
+                return Some(output);
             }
         }
         self.bars
@@ -884,7 +1209,9 @@ impl State {
     }
 
     fn sync_a11y(&mut self) {
-        self.a11y.sync(&self.launcher);
+        if let Some(a11y) = self.a11y.as_mut() {
+            a11y.sync(&self.launcher);
+        }
     }
 
     fn create_bar(&mut self, output: wl_output::WlOutput) {
@@ -1085,6 +1412,9 @@ impl OutputHandler for State {
         if self.bar_wanted(name.as_deref()) {
             self.create_bar(output);
         }
+        self.sync_hypr();
+        self.sync_tray(self.tray_sender.clone());
+        self.reschedule_clock();
     }
 
     fn update_output(
@@ -1109,6 +1439,9 @@ impl OutputHandler for State {
                 self.create_bar(output.clone());
             }
         }
+        self.sync_hypr();
+        self.sync_tray(self.tray_sender.clone());
+        self.reschedule_clock();
         self.invalidate_bars();
     }
 
@@ -1121,18 +1454,25 @@ impl OutputHandler for State {
         let id = output.id().protocol_id();
         if self.launcher.output_id() == Some(id) {
             self.ime_disable();
-            self.launcher.forget_surface();
+            if let Some(surface) = self.launcher.forget_surface() {
+                self.deferred_surfaces.push(surface);
+            }
             self.sync_a11y();
         }
-        self.bars.remove(&id);
+        self.remove_bar(id);
+        self.sync_tray(self.tray_sender.clone());
+        self.sync_hypr();
+        self.reschedule_clock();
     }
 }
 
 impl LayerShellHandler for State {
     fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
-        if self.launcher.on_layer_closed(layer) {
+        if let Some(surface) = self.launcher.on_layer_closed(layer) {
+            self.deferred_surfaces.push(surface);
             self.ime_disable();
             self.sync_a11y();
+            self.sync_hypr();
             return;
         }
         let key = self
@@ -1141,7 +1481,10 @@ impl LayerShellHandler for State {
             .find(|(_, bar)| bar.layer.wl_surface() == layer.wl_surface())
             .map(|(key, _)| *key);
         if let Some(key) = key {
-            self.bars.remove(&key);
+            self.remove_bar(key);
+            self.sync_tray(self.tray_sender.clone());
+            self.sync_hypr();
+            self.reschedule_clock();
         }
     }
 
@@ -1224,7 +1567,17 @@ impl State {
             .and_then(|id| self.tray_items.iter().find(|item| item.id == id))
             .cloned()
         {
-            tray::activate(&item);
+            if let Some(service) = &self.tray_service {
+                match service.activate(&item) {
+                    Ok(()) => {}
+                    Err(tray::ActivateError::Full) => {
+                        eprintln!("hayu: tray activation queue full; activation rejected");
+                    }
+                    Err(tray::ActivateError::Stopped) => {
+                        eprintln!("hayu: tray service stopped; activation dropped");
+                    }
+                }
+            }
             return;
         }
         let Some(id) = render::pill_at(&bar.pills, logical_x, scale) else {
@@ -1233,9 +1586,11 @@ impl State {
         if id == self.active_workspace {
             return;
         }
-        let Some(hypr) = &self.hypr else { return };
-        if let Err(error) = hypr.switch_workspace(id) {
-            eprintln!("hayu: cannot switch to workspace {id}: {error}");
+        let Some(service) = &self.hypr_service else {
+            return;
+        };
+        if service.switch_workspace(id).is_err() {
+            eprintln!("hayu: Hyprland action queue full; workspace switch rejected for {id}");
         }
     }
 }
@@ -1496,6 +1851,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn service_predicates_follow_actual_bar_consumers() {
+        let mut cfg = Config::default();
+        assert!(hypr_wanted(&cfg, true, false));
+        assert!(!hypr_wanted(&cfg, false, false));
+        assert!(hypr_wanted(&cfg, false, true));
+        cfg.launcher.enabled = false;
+        assert!(hypr_wanted(&cfg, true, false));
+        cfg.bar.left.clear();
+        cfg.bar.center.clear();
+        cfg.bar.right.clear();
+        assert!(!hypr_wanted(&cfg, true, false));
+        cfg.bar.right.push("tray".into());
+        assert!(!hypr_wanted(&cfg, true, false));
+        cfg.tray.enabled = false;
+        assert!(!hypr_wanted(&cfg, true, false));
+        cfg.tray.enabled = true;
+        cfg.bar.outputs = vec!["DP-1".into()];
+        assert!(bar_uses_tray(&cfg, Some("DP-1")));
+        assert!(
+            !bar_uses_tray(&cfg, None),
+            "an unnamed output does not match a named filter"
+        );
+        assert!(!bar_uses_tray(&cfg, Some("DP-2")));
+        cfg.bar.center.push("clock".into());
+        assert!(clock_wanted(&cfg, true));
+        cfg.bar.enabled = false;
+        assert!(!clock_wanted(&cfg, true));
+        cfg.bar.enabled = true;
+        cfg.bar.center.clear();
+        assert!(!clock_wanted(&cfg, true));
+    }
+
+    #[test]
+    fn generation_and_connection_stamps_reject_stale_results() {
+        assert!(generation_matches(4, 4));
+        assert!(!generation_matches(3, 4));
+        assert!(snapshot_stamp_matches(2, 7, 2, 7, true));
+        assert!(!snapshot_stamp_matches(1, 7, 2, 7, true));
+        assert!(!snapshot_stamp_matches(2, 6, 2, 7, true));
+        assert!(!snapshot_stamp_matches(2, 7, 2, 7, false));
+    }
+
+    #[test]
     fn clock_step_only_reacts_to_unescaped_seconds() {
         assert_eq!(clock_step("%H:%M:%S"), ClockStep::Second);
         assert_eq!(clock_step("%S"), ClockStep::Second);
@@ -1507,16 +1905,17 @@ mod tests {
     #[test]
     fn clock_wanted_requires_enabled_bar_with_clock_module() {
         let mut cfg = Config::default();
-        assert!(clock_wanted(&cfg));
+        assert!(clock_wanted(&cfg, true));
+        assert!(!clock_wanted(&cfg, false));
 
         cfg.bar.center.clear();
-        assert!(!clock_wanted(&cfg));
+        assert!(!clock_wanted(&cfg, true));
 
         cfg.bar.left.push("clock".into());
-        assert!(clock_wanted(&cfg));
+        assert!(clock_wanted(&cfg, true));
 
         cfg.bar.enabled = false;
-        assert!(!clock_wanted(&cfg));
+        assert!(!clock_wanted(&cfg, true));
     }
 
     #[test]
@@ -1547,5 +1946,60 @@ mod tests {
         }
         assert!(take_dirty(&mut dirty));
         assert!(!take_dirty(&mut dirty));
+    }
+
+    #[test]
+    fn an_answered_error_stops_the_wait_only_for_the_epoch_it_answered() {
+        // Fresh service, no answer yet: wait for the attempt.
+        assert!(needs_fresh_snapshot(true, None, 7, 3));
+        // A connected error answers epoch 3, so the pending launcher maps now.
+        assert_eq!(
+            launcher_map_decision(true, false, needs_fresh_snapshot(true, Some((7, 3)), 7, 3)),
+            LauncherMap::Now
+        );
+        // The previous epoch's answer must not cover a reconnect: wait again.
+        assert_eq!(
+            launcher_map_decision(true, false, needs_fresh_snapshot(true, Some((7, 2)), 7, 3)),
+            LauncherMap::Wait
+        );
+        // Disconnected after this generation answered: fall back, no wait.
+        assert_eq!(
+            launcher_map_decision(true, false, needs_fresh_snapshot(false, Some((7, 2)), 7, 3)),
+            LauncherMap::Now
+        );
+        // Disconnected before the first answer: the worker still owes one.
+        assert!(needs_fresh_snapshot(false, None, 7, 3));
+        // A new service generation owes its own answer.
+        assert!(needs_fresh_snapshot(false, Some((6, 3)), 7, 3));
+    }
+
+    #[test]
+    fn a_current_epoch_error_maps_the_fallback_but_a_stale_one_is_ignored() {
+        // Current connection: the error answers the attempt, so the pending
+        // launcher maps now instead of waiting forever.
+        assert_eq!(
+            snapshot_error_map(3, 2, 3, 2, false),
+            Some(LauncherMap::Now)
+        );
+        // Same generation but the previous connection epoch: stale, and it
+        // must not mark the attempt or move the overlay.
+        assert_eq!(snapshot_error_map(3, 1, 3, 2, false), None);
+        // A late error from the previous service generation is stale too.
+        assert_eq!(snapshot_error_map(2, 2, 3, 2, false), None);
+    }
+
+    #[test]
+    fn launcher_waits_for_a_snapshot_only_while_one_is_owed() {
+        // A service started by this open: wait for its first snapshot even
+        // before the connection is up, so the first output is not a guess.
+        assert_eq!(launcher_map_decision(true, false, true), LauncherMap::Wait);
+        // A current snapshot maps immediately.
+        assert_eq!(launcher_map_decision(true, true, true), LauncherMap::Now);
+        // A failed discovery answers the attempt too, so a dead service
+        // cannot stall an open; the same holds after it delivered once and
+        // then lost the compositor. Either way: Wayland outputs.
+        assert_eq!(launcher_map_decision(true, false, false), LauncherMap::Now);
+        // No service at all: nothing is owed.
+        assert_eq!(launcher_map_decision(false, false, true), LauncherMap::Now);
     }
 }
