@@ -661,15 +661,15 @@ mod tests {
     #[test]
     fn all_64_icon_cells_survive_simulated_limits() {
         let icons = 64;
-        let image = strip(icons, 128, 64);
+        let image = strip(icons, 512, 512);
         for limit in [2048, 4096] {
             let (width, height, pixels) = upload_pixels(&image, limit).unwrap();
-            assert_eq!((width, height), (limit, 64));
+            assert_eq!((width, height), (limit, 512));
             let cell = width / icons;
             assert_eq!(cell * icons, width);
             for index in 0..icons {
                 let x = index * cell + cell / 2;
-                let start = ((32 * width + x) * 4) as usize;
+                let start = ((256 * width + x) * 4) as usize;
                 assert_eq!(
                     pixels[start],
                     (index * 4) as u8,
