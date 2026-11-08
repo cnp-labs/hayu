@@ -1,8 +1,11 @@
 #!/usr/bin/python3
 """Live AT-SPI checks for Hayu launcher; logs evidence to /tmp/opencode."""
+import json
 import os
 import pathlib
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -13,22 +16,89 @@ gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-BIN = ROOT / "target/release/hayu"
-KEYIN = ROOT / "tools/live/keyin/target/release/keyin"
+BIN = pathlib.Path(os.environ.get("HAYU_BIN") or ROOT / "target/release/hayu")
+KEYIN = pathlib.Path(os.environ.get("KEYIN_BIN") or ROOT / "tools/live/keyin/target/release/keyin")
 BUS_DEST = "org.a11y.Bus"
 BUS_PATH = "/org/a11y/bus"
-LOG = pathlib.Path(f"/tmp/opencode/hayu-a11y-suite-{os.getpid()}.log")
+LOG_DIR = pathlib.Path("/tmp/opencode/hayu-lifecycle/live")
+LOG = LOG_DIR / f"a11y-suite-{os.getpid()}.log"
 
 def log(*args):
     print(*args, flush=True)
+
+def live_instance():
+    """Resolve the live Hyprland instance, not the possibly stale env signature."""
+    real = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    if (real / "hypr").is_symlink():
+        real = (real / "hypr").resolve().parent
+    out = subprocess.check_output(
+        ["hyprctl", "instances", "-j"],
+        env={**os.environ, "XDG_RUNTIME_DIR": str(real)}, text=True)
+    inst = json.loads(out)
+    if len(inst) != 1:
+        raise RuntimeError(f"need exactly one Hyprland instance, got {len(inst)}")
+    return real, inst[0]["instance"], inst[0]["wl_socket"]
 
 def status():
     out = subprocess.check_output([
         "gdbus", "call", "--session", "--dest", BUS_DEST,
         "--object-path", BUS_PATH, "--method",
         "org.freedesktop.DBus.Properties.Get", "org.a11y.Status", "IsEnabled"
-    ], text=True).strip()
+    ], text=True, timeout=5).strip()
     return out, "true" in out.lower()
+
+def set_enabled(value):
+    subprocess.run(["gdbus", "call", "--session", "--dest", BUS_DEST,
+        "--object-path", BUS_PATH, "--method", "org.freedesktop.DBus.Properties.Set",
+        "org.a11y.Status", "IsEnabled", f"<{str(value).lower()}>"],
+        check=True, text=True, capture_output=True, timeout=5)
+
+def at_address():
+    p = subprocess.run([
+        "gdbus", "call", "--session", "--dest", BUS_DEST,
+        "--object-path", BUS_PATH, "--method", "org.a11y.Bus.GetAddress"
+    ], text=True, capture_output=True, timeout=5)
+    if p.returncode:
+        return None, p.stderr.strip()
+    match = re.match(r"\('([^']+)',\)", p.stdout.strip())
+    if not match:
+        return None, f"unexpected GetAddress reply: {p.stdout.strip()}"
+    return match.group(1), ""
+
+def unix_path(address):
+    if not address.startswith("unix:path="):
+        return None
+    return address[len("unix:path="):].split(",", 1)[0]
+
+def at_bus_ok():
+    """Check the user's AT-SPI bus; GetAddress also activates org.a11y.Bus."""
+    address, error = None, ""
+    for _ in range(10):
+        address, error = at_address()
+        if not address:
+            time.sleep(0.2)
+            continue
+        path = unix_path(address)
+        if path is not None and not os.path.exists(path):
+            error = f"{address}: socket path missing"
+            time.sleep(0.2)
+            continue
+        break
+    if not address:
+        return False, error or "no address"
+    path = unix_path(address)
+    if path is not None and not os.path.exists(path):
+        return False, f"{address}: socket path missing (stale AT-SPI bus)"
+    listed = subprocess.run([
+        "gdbus", "call", "--address", address, "--dest", "org.freedesktop.DBus",
+        "--object-path", "/org/freedesktop/DBus",
+        "--method", "org.freedesktop.DBus.ListNames"
+    ], text=True, capture_output=True, timeout=5)
+    if listed.returncode:
+        return False, f"{address}: {listed.stderr.strip()}"
+    if "org.a11y.atspi.Registry" not in listed.stdout:
+        return False, f"{address}: org.a11y.atspi.Registry absent"
+    return True, address
 
 def command(args, env, check=True):
     p = subprocess.run([str(BIN), *args], cwd=ROOT, env=env, text=True, capture_output=True)
@@ -38,6 +108,38 @@ def command(args, env, check=True):
     if check and p.returncode:
         raise RuntimeError(f"hayu {args} failed ({p.returncode})")
     return p.returncode
+
+def proc_env(pid):
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        return {}
+    env = {}
+    for entry in raw.split(b"\0"):
+        if b"=" in entry:
+            key, value = entry.split(b"=", 1)
+            env[key.decode(errors="replace")] = value.decode(errors="replace")
+    return env
+
+def wait_private_env(proc, runtime, wanted, timeout=5):
+    """Popen can return before exec; poll our own child until it carries the
+    private environment, and show exactly what was observed for evidence."""
+    want = str(runtime)
+    seen = {}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        env = proc_env(proc.pid)
+        seen = {k: v for k, v in env.items()
+                if k.startswith("XDG_") or k in ("HOME", "HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY")}
+        if env.get("XDG_RUNTIME_DIR") != want:
+            if proc.poll() is not None:
+                break
+            time.sleep(.05)
+            continue
+        bad = [f"{k}={env.get(k)!r} expected {v!r}" for k, v in wanted.items() if env.get(k) != v]
+        return not bad, seen, bad
+    return False, seen, [f"XDG_RUNTIME_DIR={seen.get('XDG_RUNTIME_DIR')!r} expected {want!r}"]
 
 def walk(app):
     yield app
@@ -99,27 +201,79 @@ def key(env, *args):
         raise RuntimeError(f"keyin failed: {args}")
 
 def main():
-    LOG.parent.mkdir(parents=True, exist_ok=True)
+    if not BIN.is_file() or not KEYIN.is_file():
+        raise SystemExit(f"missing binary: {BIN} or {KEYIN}")
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    real, session, wl = live_instance()
+    initial, was_enabled = status()
+    user_sock = real / "hayu" / session / "control.sock"
+    user_inode = user_sock.stat().st_ino if user_sock.exists() else None
     with LOG.open("w", buffering=1) as stream:
         original_stdout, original_stderr = sys.stdout, sys.stderr
         sys.stdout = sys.stderr = stream
-        initial, was_enabled = status()
         log("cwd:", os.getcwd(), "script root:", ROOT, "python:", sys.executable)
+        log("live signature:", session, "wayland:", wl, "real runtime:", real)
+        log("user shell socket:", user_sock, "inode:", user_inode)
         log("AT-SPI initial IsEnabled:", initial)
-        work = pathlib.Path(tempfile.mkdtemp(prefix="hayu-a11y-", dir="/tmp/opencode"))
+
+        work = pathlib.Path(tempfile.mkdtemp(prefix=f"a11y-work-{os.getpid()}-", dir=LOG_DIR))
         # Wayland/Hyprland paths are symlinked, but the control socket lives in
         # this directory: keep it short enough for SUN_LEN (108 bytes).
         runtime = pathlib.Path(tempfile.mkdtemp(prefix="hr-", dir="/tmp"))
-        proc = None
+        for name in ("home", "config", "data", "state", "cache"):
+            (runtime / name).mkdir()
+        state = {"proc": None, "env": None, "restored": was_enabled, "user_sock_ok": True}
+
+        def restore_at(where):
+            if state["restored"]:
+                try:
+                    log(f"AT-SPI IsEnabled left unchanged ({where}):", status()[0])
+                except Exception as exc:
+                    log(f"WARNING: cannot re-read AT-SPI IsEnabled ({where}):", exc)
+                return
+            state["restored"] = True
+            try:
+                set_enabled(False)
+                now = status()[0]
+                log(f"AT-SPI restored IsEnabled ({where}):", now, "expected:", initial)
+                if now != initial:
+                    log("WARNING: AT-SPI IsEnabled did not read back as captured")
+            except Exception as exc:
+                log(f"WARNING: AT-SPI restore failed ({where}):", exc)
+
+        def cleanup(signum=None):
+            proc = state["proc"]
+            if proc is not None and proc.poll() is None:
+                subprocess.run([str(BIN), "quit"], cwd=ROOT, env=state["env"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try: proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.terminate()
+                    try: proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired: proc.kill(); proc.wait()
+            restore_at("signal" if signum is not None else "finally")
+            shutil.rmtree(runtime, ignore_errors=True)
+            if user_sock.exists():
+                now_inode = user_sock.stat().st_ino
+            else:
+                now_inode = None
+            state["user_sock_ok"] = now_inode == user_inode
+            log("user shell socket after:", user_sock, "inode:", now_inode,
+                "expected:", user_inode, "unchanged:", state["user_sock_ok"])
+            log("work retained:", work)
+            if signum is not None:
+                stream.flush()
+                os._exit(128 + signum)
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, lambda s, _f: cleanup(s))
         try:
-            # A private runtime dir keeps every client command off an existing
-            # shell; symlinks preserve Wayland and Hyprland discovery.
-            base_runtime = pathlib.Path(os.environ["XDG_RUNTIME_DIR"])
-            for entry in base_runtime.iterdir():
-                if entry.name.startswith("wayland-") or entry.name == "hypr":
-                    (runtime / entry.name).symlink_to(entry)
-            session = os.environ["HYPRLAND_INSTANCE_SIGNATURE"]
-            control = runtime / "hayu" / session / "control.sock"
+            (runtime / wl).symlink_to(real / wl)
+            if (real / f"{wl}.lock").exists():
+                (runtime / f"{wl}.lock").symlink_to(real / f"{wl}.lock")
+            (runtime / "hypr").symlink_to(real / "hypr")
+            session_sig = session
+            control = runtime / "hayu" / session_sig / "control.sock"
             if control.exists():
                 raise RuntimeError(f"refusing: existing Hayu control socket {control}")
             log("preflight isolated runtime:", runtime, "control absent:", not control.exists())
@@ -127,19 +281,29 @@ def main():
             data = work / "data/applications"
             config.mkdir(parents=True)
             data.mkdir(parents=True)
-            (config / "config.toml").write_text('schema_version = 1\n\n[bar]\nposition = "top"\nheight = 32\n')
+            (config / "config.toml").write_text(
+                'schema_version = 1\n\n[bar]\nposition = "bottom"\nheight = 32\n\n'
+                '[tray]\nenabled = false\n')
             for name, label in (("a", "A11y Cedar"), ("b", "A11y Maple"), ("c", "A11y Birch")):
                 (data / f"a11y-{name}.desktop").write_text(
                     f"[Desktop Entry]\nType=Application\nName={label}\nExec=/usr/bin/true\n")
             if not was_enabled:
-                subprocess.run(["gdbus", "call", "--session", "--dest", BUS_DEST,
-                    "--object-path", BUS_PATH, "--method", "org.freedesktop.DBus.Properties.Set",
-                    "org.a11y.Status", "IsEnabled", "<true>"], check=True, text=True, capture_output=True)
+                reachable, detail = at_bus_ok()
+                log("AT-SPI bus check:", detail)
+                if not reachable:
+                    raise RuntimeError(
+                        f"AT-SPI bus/registry not reachable ({detail}); not enabling it")
+                set_enabled(True)
+                log("AT-SPI enabled for this run:", status()[0])
             env = os.environ.copy()
             env.update(XDG_RUNTIME_DIR=str(runtime), XDG_CONFIG_HOME=str(work / "config"),
-                       XDG_DATA_HOME=str(work / "data"))
+                       XDG_DATA_HOME=str(work / "data"), XDG_STATE_HOME=str(runtime / "state"),
+                       XDG_CACHE_HOME=str(runtime / "cache"), HOME=str(runtime / "home"),
+                       HYPRLAND_INSTANCE_SIGNATURE=session_sig, WAYLAND_DISPLAY=wl)
+            state["env"] = env
             proc = subprocess.Popen([str(BIN), "run"], cwd=ROOT, env=env,
                                    stdout=stream, stderr=subprocess.STDOUT)
+            state["proc"] = proc
             for _ in range(60):
                 if proc.poll() is not None:
                     raise RuntimeError(f"hayu run exited {proc.returncode}")
@@ -148,6 +312,20 @@ def main():
                 time.sleep(.15)
             else:
                 raise RuntimeError("Hayu control socket never became available")
+            # Popen may return before exec, so /proc/<pid>/environ is only
+            # trustworthy after the private control socket answers. Poll our
+            # own child and record the exact observed environment.
+            wanted = {"XDG_RUNTIME_DIR": str(runtime), "XDG_CONFIG_HOME": str(work / "config"),
+                      "XDG_DATA_HOME": str(work / "data"), "XDG_STATE_HOME": str(runtime / "state"),
+                      "XDG_CACHE_HOME": str(runtime / "cache"), "HOME": str(runtime / "home"),
+                      "HYPRLAND_INSTANCE_SIGNATURE": session_sig, "WAYLAND_DISPLAY": wl}
+            env_ok, seen, bad = wait_private_env(proc, runtime, wanted)
+            log("test shell env observed:", seen)
+            if control.exists():
+                log("private control socket:", control, "inode:", control.stat().st_ino,
+                    "user socket:", user_sock, "user inode:", user_inode)
+            if not env_ok:
+                raise RuntimeError("hayu test shell environment mismatch: " + "; ".join(bad))
             pid = proc.pid
             log("hayu pid:", pid)
             inspect(pid, "initial closed", lambda r: not any(x["name"] in ("Search applications", "Results") for x in r),
@@ -190,22 +368,10 @@ def main():
                 "empty query value, reset selection and fixture results")
             log("LIMIT: no Orca installed, so this checks the AT-SPI tree only, not speech output.")
         finally:
-            if proc is not None and proc.poll() is None:
-                subprocess.run([str(BIN), "quit"], cwd=ROOT, env=env,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                try: proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.terminate()
-                    try: proc.wait(timeout=3)
-                    except subprocess.TimeoutExpired: proc.kill(); proc.wait()
-            if not was_enabled:
-                subprocess.run(["gdbus", "call", "--session", "--dest", BUS_DEST,
-                    "--object-path", BUS_PATH, "--method", "org.freedesktop.DBus.Properties.Set",
-                    "org.a11y.Status", "IsEnabled", "<false>"], check=True, text=True, capture_output=True)
-            shutil.rmtree(runtime, ignore_errors=True)
-            shutil.rmtree(work, ignore_errors=True)
-            log("AT-SPI restored IsEnabled:", status()[0])
+            cleanup()
             sys.stdout, sys.stderr = original_stdout, original_stderr
+    if not state["user_sock_ok"]:
+        raise SystemExit("user shell control socket changed")
     print(f"LOG {LOG}")
 
 if __name__ == "__main__":
