@@ -4,7 +4,7 @@ Hayu is a Rust Wayland desktop shell for Hyprland. The repository holds the V1
 planning baseline (Markdown is the specification) plus an **M0 prototype**
 in `src/`: one layer-shell bar, a keyboard launcher reachable over a local
 control socket, `hayu config check`, `hayu doctor`, and a renderer spike binary.
-Implemented slices include the bar, launcher and minimal tray; V1 remains incomplete, with no packaging or CI. The November 7 refocus prioritizes a simple, minimalist, lightweight and responsive desktop shell, not a general UI framework (docs/REFOCUS.md). Existing V1 categories remain until explicit product approval changes them. The
+Implemented slices include the bar, launcher and minimal tray; V1 remains incomplete, with no packaging or CI. The November 7 refocus prioritizes a simple, minimalist, lightweight and responsive desktop shell, not a general UI framework (docs/REFOCUS.md). D-12 approves core bar/configuration/reload/IPC, optional launcher/tray/other modules, and mandatory input/IME/accessibility/scaling/output foundations; all V1 categories and release gates remain. The
 renderer is decided: GLES/EGL with glow, CPU path for tests only (ADR-0006);
 both surfaces draw through it.
 
@@ -36,8 +36,8 @@ commands talk to `$XDG_RUNTIME_DIR/hayu/<session-id>/control.sock`; without a
 running shell they exit non-zero with a readable message.
 
 `hayu reload` applies the theme, clock format, bar height/position,
-`bar.enabled`, `bar.outputs` and `launcher.enabled`; the widget lists and
-every unread section still need a restart, and a change to one of them
+`bar.enabled`, `bar.outputs`, bar widget lists, `launcher.enabled` and `tray.enabled`;
+every unread section still needs a restart, and a change to one of them
 prints `restart required for: ...` while still exiting 0. An invalid file
 exits non-zero and leaves the running state untouched.
 
@@ -55,7 +55,7 @@ exits non-zero and leaves the running state untouched.
   Reference these IDs instead of inventing numbering.
 - "First release" means full V1 at M6, never the M0 bar.
 - Foundational changes (UI foundation, config format, renderer, privacy/state
-  model) require a new ADR in `docs/adr/`; next number is **0008**. Feature
+  model) require a new ADR in `docs/adr/`; next number is **0009** (ADR-0008 covers consumer-owned services). Feature
   changes need a PRD ID plus matching SCOPE, TESTING, and budget updates.
 - Noctalia creates no feature-parity obligation; do not copy its code, assets,
   or palette.

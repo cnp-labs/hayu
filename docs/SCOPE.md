@@ -8,6 +8,8 @@ All user-selected features: bar/workspaces/clock/window title, launcher, tray, n
 
 Features are implemented incrementally but remain obligations for the first release. A bar-only alpha may be used for testing, but must not be labeled a complete V1.
 
+D-12 approves lifecycle responsibilities: core is bar/workspaces/clock/title plus configuration, hot reload and control IPC. Keyboard/pointer, IME, accessibility, integer/fractional scaling and surface/output lifecycle including hotplug are mandatory foundations. Every other selected feature above, including launcher and tray, is optional by enablement, not removed from V1. Disabled optional modules start no dedicated background work, service connections or module resource loads. Shared services survive only for other actual consumers. See [REFOCUS.md](REFOCUS.md) and ADR-0008 for the ownership contract.
+
 ## Initial feature boundaries
 
 | Area | Proposed V1 minimum | Deferred |

@@ -19,7 +19,9 @@ Baseline date: November 2, 2026. This document distinguishes user decisions from
 
 ## November 7, 2026 refocus
 
-D-11 (user-decided): prioritize a simple, minimalist, lightweight and responsive desktop shell, not a general-purpose UI framework. Evaluate CPU, RAM, GPU activity and background work in real use. Preserve Rust, Hyprland-first, TOML, GLES/EGL, working features, accessibility and IME. This supersedes conflicting broad-framework ambitions, not D-06's feature categories. Core/optional delivery priorities in [REFOCUS.md](REFOCUS.md) are proposals; no smaller V1 release is approved. Historical ADRs remain unchanged.
+D-11 (user-decided): prioritize a simple, minimalist, lightweight and responsive desktop shell, not a general-purpose UI framework. Evaluate CPU, RAM, GPU activity and background work in real use. Preserve Rust, Hyprland-first, TOML, GLES/EGL, working features, accessibility and IME. This supersedes conflicting broad-framework ambitions, not D-06's feature categories. Historical ADRs remain unchanged.
+
+D-12 (user-decided, lifecycle follow-up): core is bar/workspaces/clock/title plus configuration, reload and control IPC. Keyboard/pointer, IME, accessibility, scaling and surface/output/hotplug lifecycle are mandatory foundations. Launcher, tray, notifications/history, control center, media/OSD, wallpaper picker, dock and clipboard are optional modules. Disabled modules own no dedicated background work or resources; shared services live only for remaining consumers. This approves the division in [REFOCUS.md](REFOCUS.md), not a smaller V1 release or cancellation of D-06. ADR-0008 records the concrete service-ownership implementation.
 
 ## Baseline proposals not explicitly selected
 

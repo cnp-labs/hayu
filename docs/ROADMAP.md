@@ -4,7 +4,7 @@ Status: proposed work sequence without calendar deadlines. Every user-selected f
 
 ## November 7 refocus
 
-Prioritize stabilization and measurement of existing bar/launcher/tray slices before expanding service integrations. Keep existing V1 feature commitments and milestone gates; proposed core/optional priorities require product approval ([REFOCUS.md](REFOCUS.md)). This refocus is not milestone closure.
+Prioritize stabilization and measurement of existing bar/launcher/tray slices before expanding service integrations. Keep existing V1 feature commitments and milestone gates; D-12 approves the core/optional ownership division ([REFOCUS.md](REFOCUS.md)). Launcher is optional; input, IME, accessibility, scaling and output lifecycle remain mandatory foundations for relevant surfaces. This refocus is not milestone closure.
 
 ## Milestones and exit criteria
 

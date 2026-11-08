@@ -17,11 +17,15 @@ Starting revision: `ab9e678204ca4224468368c5d1e044cf649b1413`; working tree was 
 | Renderer | Production GLES/EGL and glyph atlas are implemented. CPU reference and alternative wgpu renderer are experiments/testing, not alternative shipping renderers. |
 | V1 | Notification history, control center, media/OSD, wallpaper picker, dock and clipboard are requirements/plans, not working modules. Packaging and CI remain absent. |
 
-## Scope recommendation — product approval still required
+## Approved scope and lifecycle responsibilities
 
-- **Core delivery priority:** bar, launcher, configuration/IPC, keyboard/pointer, IME, accessibility, output/scaling and service-failure handling. These are daily entry points or correctness foundations. This is a prioritization proposal, not a newly approved smaller V1 release.
-- **Optional modules:** tray, notifications/history, audio/network/brightness/battery controls, media/OSD, wallpaper, dock and clipboard. Keep existing V1 categories; propose explicit enablement and no dedicated worker/subscription without a consumer. Clipboard privacy remains opt-in. Accessibility is not an expendable optional visual feature.
-- **Roadmap:** stabilize existing slices and measure them first; implement service-backed modules independently; then close full V1 acceptance, packaging and distribution gates. A smaller first-release scope would require explicit approval changing D-06 and release gates.
+The follow-up user decision approves this division; it supersedes the earlier proposal that placed the launcher in core.
+
+- **Core:** bar with workspaces, clock and window title; configuration, hot reload and control IPC.
+- **Mandatory foundations:** keyboard and pointer input, IME, accessibility, integer/fractional scaling, and surface/output lifecycle including hotplug. Foundations serve existing consumers; disabling an optional surface does not cancel these correctness requirements.
+- **Optional modules:** launcher, tray, notifications/history, control center, media/OSD, wallpaper picker, dock and clipboard history. All V1 categories remain required by the agreed release gates; optional means enablement and resource ownership, not cancellation or a smaller release. Clipboard remains opt-in.
+- **Lifecycle contract:** a disabled optional module starts no dedicated worker, timer, subscription, service connection or module resource load. An enabled flag alone is not an active service consumer. Shared resources remain while another real consumer needs them; output loss, reload and shutdown remove consumers. Future modules must define start/stop/restart and stale-result rejection before implementation, without a generic service framework.
+- **Roadmap:** stabilize existing slices and measure them first, then implement service-backed modules independently and close full V1 acceptance/packaging gates. No roadmap modules are implemented solely to satisfy this division.
 
 ## Engineering policy
 
@@ -37,4 +41,4 @@ Root keeps `README.md`, `AGENTS.md`, `LICENSE`, `Cargo.toml` and `Cargo.lock`. `
 
 ## Remaining risks
 
-Hyprland synchronous request paths can stall input during service failure; moving them to the existing adapter worker is follow-up work, not claimed fixed here. `tray.enabled=false` avoids starting its worker, but an enabled tray without a visible tray widget can still subscribe; tying services to dynamic consumer counts needs explicit reload/lifecycle handling. Tray RGBA snapshots/render inputs and strips still copy data; upload versioning is not a CPU allocation cache. Icon refresh/theme inheritance, a tray strip that respects actual `GL_MAX_TEXTURE_SIZE` (per-icon caps alone do not guarantee this), live fractional/hotplug coverage, AT-SPI action completeness and long-duration whole-process measurements require explicit evidence. Do not infer these from passing ordinary unit tests or short smoke runs.
+The lifecycle follow-up implements owned Hyprland/tray workers and actual-consumer reconciliation under ADR-0008; validation evidence must establish cancellation, response ordering and reload behavior before these are considered verified. Tray snapshots/render inputs share icon pixels; the combined upload strip still copies pixels, and upload versioning is not a CPU allocation cache. Icon refresh/theme inheritance, a tray strip that respects actual `GL_MAX_TEXTURE_SIZE` (per-icon caps alone do not guarantee this), live fractional/hotplug coverage, AT-SPI action completeness and long-duration whole-process measurements require explicit evidence. Do not infer these from passing ordinary unit tests or short smoke runs.
