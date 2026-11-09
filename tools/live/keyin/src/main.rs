@@ -9,6 +9,7 @@
 //! keyin hold:BackSpace          # one press held long enough for the compositor to repeat
 //! keyin raw:44                  # evdev keycode 28..=255, press and release
 //! keyin click:100:16            # left click at a layout-space point
+//! keyin rclick:100:16           # right click at a layout-space point
 //! ```
 //!
 //! `KEYIN_LAYOUT` selects the uploaded keymap (default `us`). `type:` maps
@@ -108,7 +109,7 @@ impl Dispatch<ZwpVirtualKeyboardV1, ()> for State {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: keyin type:<text> | press:<Name> | hold:<Name> | raw:<evdev> | click:<x>:<y>\n\
+        "usage: keyin type:<text> | press:<Name> | hold:<Name> | raw:<evdev> | click:<x>:<y> | rclick:<x>:<y>\n\
          names: Return Escape BackSpace Tab Delete Up Down Left Right Home End\n\
          env: KEYIN_LAYOUT (default us), KEYIN_STEP_MS (default 20), KEYIN_SCREEN (WxH)"
     );
@@ -272,7 +273,9 @@ fn main() {
         }
     };
     let keyboard = manager.create_virtual_keyboard(&seat, &qh, ());
-    let wants_pointer = args.iter().any(|arg| arg.starts_with("click:"));
+    let wants_pointer = args
+        .iter()
+        .any(|arg| arg.starts_with("click:") || arg.starts_with("rclick:"));
     let pointer: Option<ZwlrVirtualPointerV1> = if wants_pointer {
         let manager: ZwlrVirtualPointerManagerV1 = match globals.bind(&qh, 1..=2, ()) {
             Ok(manager) => manager,
@@ -341,7 +344,7 @@ fn main() {
                 };
                 tap(key, false, hold);
             }
-            "click" => {
+            "click" | "rclick" => {
                 let (x, y) = match value.split_once(':') {
                     Some((x, y)) => match (x.parse::<f64>(), y.parse::<f64>()) {
                         (Ok(x), Ok(y)) => (x, y),
@@ -363,11 +366,12 @@ fn main() {
                 pointer.frame();
                 let _ = conn.flush();
                 std::thread::sleep(Duration::from_millis(60));
-                pointer.button(now_ms(), 0x110, wl_pointer::ButtonState::Pressed);
+                let button = if kind == "rclick" { 0x111 } else { 0x110 };
+                pointer.button(now_ms(), button, wl_pointer::ButtonState::Pressed);
                 pointer.frame();
                 let _ = conn.flush();
                 std::thread::sleep(Duration::from_millis(60));
-                pointer.button(now_ms(), 0x110, wl_pointer::ButtonState::Released);
+                pointer.button(now_ms(), button, wl_pointer::ButtonState::Released);
                 pointer.frame();
                 let _ = conn.flush();
                 std::thread::sleep(Duration::from_millis(step));
